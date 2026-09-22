@@ -17,3 +17,4 @@ redis
 requests
 
 pydantic
+structlog
