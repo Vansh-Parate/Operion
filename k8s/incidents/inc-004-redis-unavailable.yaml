@@ -20,13 +20,19 @@ spec:
     spec:
       containers:
         - name: payment-service
-          image: operion-payment-service:v1
+          image: operion-payment-service:v3
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           env:
             - name: PAYMENT_PROVIDER_URL
               value: "http://payment-provider.local"
+            - name: INCIDENT_MODE
+              value: "redis-unavailable"
+            - name: REDIS_HOST
+              value: "127.0.0.1"
+            - name: REDIS_PORT
+              value: "6399"
           readinessProbe:
             httpGet:
               path: /health

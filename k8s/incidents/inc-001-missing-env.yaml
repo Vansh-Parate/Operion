@@ -24,9 +24,6 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
-          env:
-            - name: PAYMENT_PROVIDER_URL
-              value: "http://payment-provider.local"
           readinessProbe:
             httpGet:
               path: /health

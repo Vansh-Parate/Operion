@@ -29,7 +29,7 @@ spec:
               value: "http://payment-provider.local"
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/invalid
               port: 8000
             initialDelaySeconds: 2
             periodSeconds: 5

@@ -20,13 +20,20 @@ spec:
     spec:
       containers:
         - name: payment-service
-          image: operion-payment-service:v1
+          image: operion-payment-service:v2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           env:
             - name: PAYMENT_PROVIDER_URL
               value: "http://payment-provider.local"
+            - name: INCIDENT_MODE
+              value: "oom"
+          resources:
+            requests:
+              memory: 64Mi
+            limits:
+              memory: 128Mi
           readinessProbe:
             httpGet:
               path: /health
