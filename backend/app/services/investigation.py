@@ -10,6 +10,7 @@ from app.tools.k8s_client import (
 )
 from app.services.evidence_processor import process_evidence
 from app.services.diagnosis import diagnose_incident
+from app.services.llm_diagnosis import diagnose_with_llm
 
 logger = structlog.get_logger(__name__)
 
@@ -54,10 +55,31 @@ def collect_incident_context() -> IncidentContext:
 if __name__ == "__main__":
     incident = collect_incident_context()
 
-    diagnosis = diagnose_incident(incident)
+    baseline = diagnose_incident(
+        incident
+    )
+
+    llm_diagnosis = diagnose_with_llm(
+        incident
+    )
 
     print("\n===== INCIDENT =====")
-    print(incident.model_dump_json(indent=2))
+    print(
+        incident.model_dump_json(
+            indent=2
+        )
+    )
 
-    print("\n===== DIAGNOSIS =====")
-    print(diagnosis.model_dump_json(indent=2))
+    print("\n===== DETERMINISTIC DIAGNOSIS =====")
+    print(
+        baseline.model_dump_json(
+            indent=2
+        )
+    )
+
+    print("\n===== LLM + RAG DIAGNOSIS =====")
+    print(
+        llm_diagnosis.model_dump_json(
+            indent=2
+        )
+    )

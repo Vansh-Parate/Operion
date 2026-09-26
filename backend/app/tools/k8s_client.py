@@ -204,10 +204,9 @@ def get_logs(pod_names: set[str] | None = None):
 
         try:
             logs = v1.read_namespaced_pod_log(
-            name=pod_name,
-            namespace=NAMESPACE,
-            container="payment-service",
-            tail_lines=100,
+                name=pod_name,
+                namespace=NAMESPACE,
+                container="payment-service",
             )
 
             if isinstance(logs, bytes):
