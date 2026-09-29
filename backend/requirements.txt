@@ -7,3 +7,4 @@ kubernetes
 qdrant-client
 sentence-transformers
 requests
+langgraph
