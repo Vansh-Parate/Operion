@@ -1,5 +1,6 @@
-from typing import Any, TypedDict
+from typing import Any, TypedDict, NotRequired
 
+from app.agent.investigation_models import Hypothesis, ToolCallRecord
 from app.agent.models import PolicyDecision, RemediationPlan
 from app.models.diagnosis import Diagnosis
 from app.models.incident import IncidentContext
@@ -15,3 +16,9 @@ class IncidentState(TypedDict):
     verification_result: dict[str, Any] | None
     iteration: int
     resolved: bool
+    hypotheses: NotRequired[list[Hypothesis]]
+    next_tool: NotRequired[str | None]
+    next_tool_reason: NotRequired[str | None]
+    tool_history: NotRequired[list[ToolCallRecord]]
+    investigation_iteration: NotRequired[int]
+    sufficient_evidence: NotRequired[bool]

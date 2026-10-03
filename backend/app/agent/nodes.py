@@ -1,6 +1,9 @@
 from typing import Any
 
 from app.agent.planner import create_remediation_plan
+from app.agent.investigation_models import ToolCallRecord
+from app.agent.investigation_tools import execute_investigation_tool, merge_evidence
+from app.agent.investigator import generate_investigation_decision
 from app.agent.policy import validate_plan
 from app.agent.state import IncidentState
 from app.agent.tools import (
@@ -14,8 +17,9 @@ from app.services.llm_diagnosis import diagnose_with_llm
 
 def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
     # Clear results tied to the previous evidence when retrying.
+    incident = state.get("incident") if state.get("iteration", 0) == 0 else None
     return {
-        "incident": collect_incident_context(),
+        "incident": incident if incident is not None else collect_incident_context(),
         "iteration": state.get("iteration", 0) + 1,
         "diagnosis": None,
         "remediation_plan": None,
@@ -24,7 +28,49 @@ def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
         "execution_result": None,
         "verification_result": None,
         "resolved": False,
+        "hypotheses": [],
+        "next_tool": None,
+        "next_tool_reason": None,
+        "tool_history": [],
+        "investigation_iteration": 0,
+        "sufficient_evidence": False,
     }
+
+
+def generate_hypotheses_node(state: IncidentState) -> dict[str, Any]:
+    incident = state.get("incident")
+    if incident is None:
+        raise ValueError("Investigation requires collected incident evidence.")
+    try:
+        decision = generate_investigation_decision(incident, state.get("tool_history", []))
+    except Exception:
+        # Preserve the existing diagnosis pipeline if the local model is unavailable.
+        return {"hypotheses": state.get("hypotheses", []), "next_tool": None,
+                "next_tool_reason": None, "sufficient_evidence": False}
+    return {"hypotheses": decision.hypotheses, "next_tool": decision.next_tool,
+            "next_tool_reason": decision.next_tool_reason,
+            "sufficient_evidence": decision.sufficient_evidence}
+
+
+def investigate_with_tool_node(state: IncidentState) -> dict[str, Any]:
+    tool_name = state.get("next_tool")
+    if tool_name is None:
+        return {}
+    incident = state.get("incident")
+    if incident is None:
+        raise ValueError("Investigation requires collected incident evidence.")
+    reason = state.get("next_tool_reason") or "Additional evidence requested."
+    history = list(state.get("tool_history", []))
+    try:
+        updated = merge_evidence(incident, execute_investigation_tool(tool_name, incident))
+        history.append(ToolCallRecord(tool=tool_name, reason=reason, success=True,
+                                      evidence_added=len(updated.evidence) - len(incident.evidence)))
+    except Exception:
+        updated = incident
+        history.append(ToolCallRecord(tool=tool_name, reason=reason, success=False))
+    return {"incident": updated, "tool_history": history,
+            "investigation_iteration": state.get("investigation_iteration", 0) + 1,
+            "next_tool": None, "next_tool_reason": None}
 
 
 def diagnose_node(state: IncidentState) -> dict[str, Any]:

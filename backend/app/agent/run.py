@@ -17,6 +17,8 @@ def main() -> None:
         "policy_decision": None, "approved": args.approve,
         "execution_result": None, "verification_result": None,
         "iteration": 0, "resolved": False,
+        "hypotheses": [], "next_tool": None, "next_tool_reason": None,
+        "tool_history": [], "investigation_iteration": 0, "sufficient_evidence": False,
     }
     state = initial
     announced_iteration = 0

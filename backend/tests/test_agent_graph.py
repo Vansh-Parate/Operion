@@ -9,6 +9,7 @@ from app.agent.graph import (
     build_incident_graph, route_after_approval, route_after_policy, route_after_verify,
 )
 from app.agent.models import PolicyDecision, RemediationPlan
+from app.agent.investigation_models import InvestigationDecision
 from app.agent.planner import create_remediation_plan
 from app.agent.state import IncidentState
 from app.models.diagnosis import Diagnosis
@@ -53,6 +54,9 @@ def offline(monkeypatch: pytest.MonkeyPatch, incident: IncidentContext,
     diagnose = Mock(return_value=diagnosis)
     monkeypatch.setattr(nodes, "collect_incident_context", collect)
     monkeypatch.setattr(nodes, "diagnose_with_llm", diagnose)
+    monkeypatch.setattr(nodes, "generate_investigation_decision", Mock(return_value=InvestigationDecision(
+        sufficient_evidence=True,
+    )))
     return collect, diagnose
 
 
