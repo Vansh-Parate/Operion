@@ -30,7 +30,7 @@ def decision(tool=None, sufficient=False):
 
 
 def test_sufficient_evidence_routes_to_diagnosis():
-    assert route_after_hypotheses({"sufficient_evidence": True, "next_tool": "get_events"}) == "diagnose"
+    assert route_after_hypotheses({"sufficient_evidence": True, "next_tool": "get_events"}) == "retrieve_knowledge"
 
 
 def test_insufficient_evidence_selects_one_allowed_tool(monkeypatch, incident):
@@ -38,7 +38,7 @@ def test_insufficient_evidence_selects_one_allowed_tool(monkeypatch, incident):
     response.json.return_value = {"response": decision("get_events").model_dump_json()}
     monkeypatch.setattr(investigator.requests, "post", Mock(return_value=response))
     result = investigator.generate_investigation_decision(incident, [])
-    assert result.next_tool == "get_events"
+    assert result.next_tool == "get_pod_status"
     assert result.hypotheses[0].supporting_evidence_ids == ["E1"]
     prompt = investigator.requests.post.call_args.kwargs["json"]["prompt"]
     assert "E1:" in prompt and "get_previous_logs" in prompt
@@ -61,7 +61,7 @@ def test_repeated_tool_with_same_reason_stops(monkeypatch, incident):
     history = [ToolCallRecord(tool="get_events", reason="Inspect relevant evidence", success=True)
                for _ in range(2)]
     result = investigator.generate_investigation_decision(incident, history)
-    assert result.next_tool is None
+    assert result.next_tool == "get_pod_status"
     assert result.sufficient_evidence is False
 
 
@@ -109,8 +109,8 @@ def test_unsupported_tool_rejected_before_cluster_load(monkeypatch, incident):
 def test_max_iterations_use_best_evidence():
     assert MAX_INVESTIGATION_ITERATIONS == 5
     assert route_after_hypotheses({"next_tool": "get_logs",
-                                   "investigation_iteration": 5}) == "diagnose"
-    assert route_after_hypotheses({"next_tool": None}) == "diagnose"
+                                   "investigation_iteration": 5}) == "retrieve_knowledge"
+    assert route_after_hypotheses({"next_tool": None}) == "retrieve_knowledge"
 
 
 def test_graph_stops_at_max_with_supplied_unknown_incident(monkeypatch, incident):
@@ -123,6 +123,7 @@ def test_graph_stops_at_max_with_supplied_unknown_incident(monkeypatch, incident
     monkeypatch.setattr(nodes, "generate_investigation_decision", investigate)
     monkeypatch.setattr(nodes, "execute_investigation_tool", tool)
     monkeypatch.setattr(nodes, "diagnose_with_llm", diagnose)
+    monkeypatch.setattr(nodes, "retrieve_operational_knowledge", Mock(return_value=[]))
     result = build_incident_graph().invoke({"incident": incident, "approved": False})
     assert result["investigation_iteration"] == 5
     assert tool.call_count == 5
@@ -177,6 +178,7 @@ def test_graph_continues_existing_remediation_pipeline(monkeypatch, incident):
     monkeypatch.setattr(nodes, "generate_investigation_decision", investigate)
     monkeypatch.setattr(nodes, "execute_investigation_tool", tool)
     monkeypatch.setattr(nodes, "diagnose_with_llm", diagnose)
+    monkeypatch.setattr(nodes, "retrieve_operational_knowledge", Mock(return_value=[]))
     result = build_incident_graph().invoke({"approved": False})
     assert result["investigation_iteration"] == 1
     assert len(result["incident"].evidence) == 3

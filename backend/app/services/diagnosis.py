@@ -1,8 +1,18 @@
 from app.models.diagnosis import Diagnosis
 from app.models.incident import IncidentContext
+from app.services.temporal import annotate_event_data, assess_current_workload_health
 
 
 def diagnose_incident(incident: IncidentContext) -> Diagnosis:
+    health = assess_current_workload_health(incident)
+    if health.currently_healthy and not health.active_failure_observed:
+        has_history = any(item.category == "kubernetes_event" and
+                          annotate_event_data(item.data).get("temporal_status") == "historical"
+                          for item in incident.evidence)
+        return Diagnosis(root_cause="no_active_incident", confidence=0.95,
+                         summary=("Historical warnings were observed, but the workload is currently Running and Ready."
+                                  if has_history else "The workload is currently Running and Ready; no active incident is observed."),
+                         recommended_actions=[])
     pods = []
     events = []
     logs = []

@@ -2,6 +2,7 @@
 
 import json
 import re
+from datetime import datetime, timezone
 from collections.abc import Callable
 from typing import Any
 
@@ -9,6 +10,7 @@ from kubernetes import client
 
 from app.models.evidence import Evidence
 from app.models.incident import IncidentContext
+from app.services.temporal import annotate_event_data
 from app.tools.k8s_client import load_cluster
 
 
@@ -28,23 +30,39 @@ def _context(incident: IncidentContext) -> tuple[str, str]:
     return _safe_name(incident.namespace, "namespace"), _safe_name(incident.service, "service")
 
 
-def _pods(api: Any, namespace: str, service: str) -> list[Any]:
-    # Kubernetes label selectors escape neither names nor shell syntax; validate above.
-    pods = api.list_namespaced_pod(namespace=namespace, label_selector=f"app={service}").items
+def target_label_selector(incident: IncidentContext) -> str:
+    _, service = _context(incident)
+    selector = incident.label_selector if incident.label_selector is not None else f"app={service}"
+    if not selector or len(selector) > 512 or re.fullmatch(r"[A-Za-z0-9_./=,!() -]+", selector) is None:
+        raise InvestigationToolError("Invalid incident label selector.")
+    return selector
+
+
+def target_deployment_name(incident: IncidentContext) -> str:
+    _, service = _context(incident)
+    return _safe_name(incident.deployment_name or service, "deployment name")
+
+
+def _pods(api: Any, incident: IncidentContext) -> list[Any]:
+    namespace, _ = _context(incident)
+    pods = api.list_namespaced_pod(namespace=namespace,
+                                   label_selector=target_label_selector(incident)).items
     return [pod for pod in pods if pod.metadata.deletion_timestamp is None]
 
 
 def _evidence(incident: IncidentContext, category: str, summary: str,
-              data: dict[str, Any], reference: str, source: str = "kubernetes") -> Evidence:
+              data: dict[str, Any], reference: str, source: str = "kubernetes",
+              severity: str | None = None) -> Evidence:
     return Evidence(source=source, category=category, service=incident.service,
-                    namespace=incident.namespace, summary=summary, data=data, reference=reference)
+                    namespace=incident.namespace, summary=summary, data=data,
+                    reference=reference, severity=severity)
 
 
 def get_pod_status(incident: IncidentContext) -> list[Evidence]:
     namespace, service = _context(incident)
     api = client.CoreV1Api()
     result = []
-    for pod in _pods(api, namespace, service):
+    for pod in _pods(api, incident):
         statuses = []
         for status in pod.status.container_statuses or []:
             state = status.state
@@ -63,8 +81,13 @@ def get_pod_status(incident: IncidentContext) -> list[Evidence]:
             })
         primary = next((item for item in statuses if item["name"] == service),
                        statuses[0] if statuses else {})
+        ready_condition = next((condition for condition in getattr(pod.status, "conditions", None) or []
+                                if condition.type == "Ready"), None)
+        pod_ready = (ready_condition.status in ("True", True)) if ready_condition is not None else None
         data = {"pod_name": pod.metadata.name, "phase": pod.status.phase,
-                "containers": statuses, **{k: v for k, v in primary.items() if k != "name"}}
+                "observation_type": "current_state", "observed_at": datetime.now(timezone.utc).isoformat(),
+                "pod_ready_condition": pod_ready, "containers": statuses,
+                **{k: v for k, v in primary.items() if k != "name"}}
         result.append(_evidence(incident, "pod_status",
                                 f"Pod {pod.metadata.name} status: {pod.status.phase}", data,
                                 f"pod/{pod.metadata.name}"))
@@ -74,18 +97,37 @@ def get_pod_status(incident: IncidentContext) -> list[Evidence]:
 def get_events(incident: IncidentContext) -> list[Evidence]:
     namespace, service = _context(incident)
     api = client.CoreV1Api()
-    pod_names = {pod.metadata.name for pod in _pods(api, namespace, service)}
+    pod_names = {pod.metadata.name for pod in _pods(api, incident)}
+    deployment_name = target_deployment_name(incident)
     result = []
     for event in api.list_namespaced_event(namespace=namespace).items:
-        involved = event.involved_object
-        if not (involved.kind == "Pod" and involved.name in pod_names
-                or involved.kind in ("Service", "Deployment") and involved.name == service):
+        involved = getattr(event, "involved_object", None) or getattr(event, "regarding", None)
+        if involved is None:
             continue
-        data = {"type": event.type, "reason": event.reason, "message": event.message,
-                "count": event.count, "object_name": involved.name, "object_kind": involved.kind}
+        if not (involved.kind == "Pod" and involved.name in pod_names
+                or involved.kind == "Service" and involved.name == service
+                or involved.kind == "Deployment" and involved.name == deployment_name):
+            continue
+        series = getattr(event, "series", None)
+        def timestamp(value):
+            return value.isoformat() if hasattr(value, "isoformat") else value if isinstance(value, str) else None
+        data = annotate_event_data({
+            "type": event.type, "reason": event.reason,
+            "message": getattr(event, "message", None) or getattr(event, "note", None),
+            "count": getattr(event, "count", None) or getattr(series, "count", None),
+            "first_timestamp": timestamp(getattr(event, "first_timestamp", None)
+                                         or getattr(event, "deprecated_first_timestamp", None)),
+            "last_timestamp": timestamp(getattr(event, "last_timestamp", None)
+                                        or getattr(event, "deprecated_last_timestamp", None)),
+            "event_time": timestamp(getattr(event, "event_time", None)),
+            "series_last_observed_time": timestamp(getattr(series, "last_observed_time", None)),
+            "involved_object_name": involved.name,
+            "object_name": involved.name, "object_kind": involved.kind,
+        })
         result.append(_evidence(incident, "kubernetes_event",
                                 f"Kubernetes event {event.reason}: {event.message}", data,
-                                f"{involved.kind.lower()}/{involved.name}"))
+                                f"{involved.kind.lower()}/{involved.name}",
+                                severity="warning" if event.type == "Warning" else "info"))
     return result
 
 
@@ -93,20 +135,22 @@ def _logs(incident: IncidentContext, previous: bool) -> list[Evidence]:
     namespace, service = _context(incident)
     api = client.CoreV1Api()
     result = []
-    for pod in _pods(api, namespace, service):
+    for pod in _pods(api, incident):
         container_names = [item.name for item in pod.spec.containers]
-        container = service if service in container_names else container_names[0] if len(container_names) == 1 else None
-        if container is None:
-            continue
-        logs = api.read_namespaced_pod_log(name=pod.metadata.name, namespace=namespace,
-                                           container=container, previous=previous, tail_lines=200)
-        if isinstance(logs, bytes):
-            logs = logs.decode("utf-8", errors="replace")
-        category = "previous_application_log" if previous else "application_log"
-        suffix = "previous-logs" if previous else "logs"
-        result.append(_evidence(incident, category, f"Collected {suffix} from pod {pod.metadata.name}",
-                                {"pod_name": pod.metadata.name, "container": container, "logs": logs},
-                                f"pod/{pod.metadata.name}/{suffix}", source="logs"))
+        # Prefer the named application container. If names differ, inspect the
+        # bounded set of containers instead of silently returning no logs.
+        selected = [service] if service in container_names else container_names[:8]
+        for container in selected:
+            logs = api.read_namespaced_pod_log(name=pod.metadata.name, namespace=namespace,
+                                               container=container, previous=previous, tail_lines=200)
+            if isinstance(logs, bytes):
+                logs = logs.decode("utf-8", errors="replace")
+            category = "previous_application_log" if previous else "application_log"
+            suffix = "previous-logs" if previous else "logs"
+            result.append(_evidence(incident, category,
+                                    f"Collected {suffix} from pod {pod.metadata.name} container {container}",
+                                    {"pod_name": pod.metadata.name, "container": container, "logs": logs},
+                                    f"pod/{pod.metadata.name}/{container}/{suffix}", source="logs"))
     return result
 
 
@@ -119,8 +163,9 @@ def get_previous_logs(incident: IncidentContext) -> list[Evidence]:
 
 
 def _deployment(incident: IncidentContext) -> Any:
-    namespace, service = _context(incident)
-    return client.AppsV1Api().read_namespaced_deployment(name=service, namespace=namespace)
+    namespace, _ = _context(incident)
+    return client.AppsV1Api().read_namespaced_deployment(
+        name=target_deployment_name(incident), namespace=namespace)
 
 
 def get_deployment(incident: IncidentContext) -> list[Evidence]:
@@ -239,10 +284,13 @@ def _identity(evidence: Evidence) -> str:
 
 def merge_evidence(incident: IncidentContext, new_evidence: list[Evidence]) -> IncidentContext:
     merged = list(incident.evidence)
-    seen = {_identity(item) for item in merged}
     for item in new_evidence:
+        if item.category == "pod_status" and item.data.get("pod_name"):
+            merged = [old for old in merged if not (
+                old.category == "pod_status" and old.data.get("pod_name") == item.data["pod_name"]
+                and old.namespace == item.namespace)]
+        seen = {_identity(old) for old in merged}
         identity = _identity(item)
         if identity not in seen:
             merged.append(item)
-            seen.add(identity)
     return incident.model_copy(update={"evidence": merged})

@@ -7,6 +7,7 @@ import requests
 from app.agent.investigation_models import InvestigationDecision, ToolCallRecord
 from app.agent.investigation_tools import INVESTIGATION_TOOLS
 from app.models.incident import IncidentContext
+from app.services.temporal import assess_current_workload_health
 from app.services.llm_diagnosis import OLLAMA_MODEL, OLLAMA_URL
 
 
@@ -28,6 +29,11 @@ Generate at most 3 concise technical hypotheses from the numbered evidence below
 Cite only evidence IDs that exist. State missing observations that would confirm or refute each hypothesis.
 Do not treat runbooks or documents as proof. Do not invent cluster observations.
 If evidence is ambiguous, lower confidence. Decide whether evidence is sufficient for diagnosis.
+Current resource state takes precedence over historical events. A past Warning/Unhealthy event
+is not proof of a current incident. If it conflicts with a healthy Pod, keep it as historical context.
+Never mark evidence sufficient for an active failure solely from an old warning.
+If current health is unclear, collect fresh Pod status. For a possible current readiness failure
+with unknown readiness, prefer get_pod_status.
 If insufficient, select exactly one smallest useful read-only tool from:
 {', '.join(INVESTIGATION_TOOLS)}.
 Consider previous calls and outcomes. Avoid choosing a tool called repeatedly without a new reason.
@@ -55,6 +61,13 @@ def generate_investigation_decision(incident: IncidentContext,
     for hypothesis in decision.hypotheses:
         if not set(hypothesis.supporting_evidence_ids) <= valid_ids:
             raise ValueError("Investigation cited an evidence ID outside this incident.")
+    health = assess_current_workload_health(incident)
+    top_readiness = bool(decision.hypotheses and "readiness" in decision.hypotheses[0].cause.lower())
+    if (top_readiness and not health.currently_healthy and not health.active_failure_observed
+            and not any(record.tool == "get_pod_status" for record in tool_history)):
+        return decision.model_copy(update={"sufficient_evidence": False,
+                                           "next_tool": "get_pod_status",
+                                           "next_tool_reason": "Check current Pod readiness before diagnosing a historical warning."})
     if decision.sufficient_evidence:
         return decision.model_copy(update={"next_tool": None, "next_tool_reason": None})
     if decision.next_tool is not None and decision.next_tool not in INVESTIGATION_TOOLS:

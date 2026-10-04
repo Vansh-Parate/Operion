@@ -12,7 +12,10 @@ def create_remediation_plan(diagnosis: Diagnosis) -> RemediationPlan:
     ))
     action: RemediationAction
     parameters: dict[str, str] = {}
-    if diagnosis.root_cause == "missing_environment_variable":
+    if diagnosis.root_cause == "no_active_incident":
+        action = "none"
+        reason = "No active incident currently requires remediation."
+    elif diagnosis.root_cause == "missing_environment_variable":
         action = "patch_environment_variable"
         reason = "Required payment provider configuration is missing."
         parameters = {"name": "PAYMENT_PROVIDER_URL"}

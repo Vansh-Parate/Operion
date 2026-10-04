@@ -1,4 +1,5 @@
 from app.models.evidence import Evidence
+from app.services.temporal import annotate_event_data
 
 
 IMPORTANT_EVENT_REASONS = {
@@ -64,6 +65,7 @@ def process_evidence(evidence_list: list[Evidence]) -> list[Evidence]:
     for evidence in evidence_list:
 
         if evidence.category == "kubernetes_event":
+            evidence = evidence.model_copy(update={"data": annotate_event_data(evidence.data)})
             reason = evidence.data.get("reason")
 
             # Keep warnings and important events.

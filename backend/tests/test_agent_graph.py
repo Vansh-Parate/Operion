@@ -54,6 +54,7 @@ def offline(monkeypatch: pytest.MonkeyPatch, incident: IncidentContext,
     diagnose = Mock(return_value=diagnosis)
     monkeypatch.setattr(nodes, "collect_incident_context", collect)
     monkeypatch.setattr(nodes, "diagnose_with_llm", diagnose)
+    monkeypatch.setattr(nodes, "retrieve_operational_knowledge", Mock(return_value=[]))
     monkeypatch.setattr(nodes, "generate_investigation_decision", Mock(return_value=InvestigationDecision(
         sufficient_evidence=True,
     )))
@@ -102,7 +103,7 @@ def test_approved_graph_executes_and_verifies(offline: tuple[Mock, Mock], incide
                                   env_value="http://payment-provider.local")
     verify.assert_called_once_with(namespace="operion-sandbox")
     offline[0].assert_called_once_with()
-    offline[1].assert_called_once_with(incident)
+    offline[1].assert_called_once_with(incident, knowledge_documents=[])
 
 
 def test_graph_retry_requires_fresh_approval(offline: tuple[Mock, Mock],

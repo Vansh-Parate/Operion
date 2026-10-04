@@ -9,6 +9,8 @@ class IncidentContext(BaseModel):
 
     service: str
     namespace: str
+    label_selector: str | None = None
+    deployment_name: str | None = None
 
     started_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)

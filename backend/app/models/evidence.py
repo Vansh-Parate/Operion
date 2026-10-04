@@ -6,7 +6,6 @@ EvidenceSource = Literal[
     "kubernetes",
     "logs",
     "metrics",
-    "runbook",
 ]
 
 

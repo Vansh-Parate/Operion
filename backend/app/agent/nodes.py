@@ -11,6 +11,7 @@ from app.agent.tools import (
     verify_payment_service_recovery,
 )
 from app.models.incident import IncidentContext
+from app.rag.knowledge import retrieve_operational_knowledge
 from app.services.investigation import collect_incident_context
 from app.services.llm_diagnosis import diagnose_with_llm
 
@@ -18,8 +19,26 @@ from app.services.llm_diagnosis import diagnose_with_llm
 def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
     # Clear results tied to the previous evidence when retrying.
     incident = state.get("incident") if state.get("iteration", 0) == 0 else None
+    previous = state.get("incident")
+    target = {
+        "namespace": state.get("target_namespace") or (previous.namespace if previous else "operion-sandbox"),
+        "service": state.get("target_service") or (previous.service if previous else "payment-service"),
+        "label_selector": state.get("target_label_selector") if "target_label_selector" in state
+            else (previous.label_selector if previous else None),
+        "deployment_name": state.get("target_deployment") if "target_deployment" in state
+            else (previous.deployment_name if previous else None),
+    }
+    if incident is not None:
+        # An explicitly supplied context owns its target, including on retries.
+        target = {"namespace": incident.namespace, "service": incident.service,
+                  "label_selector": incident.label_selector,
+                  "deployment_name": incident.deployment_name}
+    # Preserve the original no-argument collector call for the default target.
+    default_target = target == {"namespace": "operion-sandbox", "service": "payment-service",
+                                "label_selector": None, "deployment_name": None}
     return {
-        "incident": incident if incident is not None else collect_incident_context(),
+        "incident": incident if incident is not None else (
+            collect_incident_context() if default_target else collect_incident_context(**target)),
         "iteration": state.get("iteration", 0) + 1,
         "diagnosis": None,
         "remediation_plan": None,
@@ -29,11 +48,16 @@ def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
         "verification_result": None,
         "resolved": False,
         "hypotheses": [],
+        "knowledge_documents": [],
         "next_tool": None,
         "next_tool_reason": None,
         "tool_history": [],
         "investigation_iteration": 0,
         "sufficient_evidence": False,
+        "target_namespace": target["namespace"],
+        "target_service": target["service"],
+        "target_label_selector": target["label_selector"],
+        "target_deployment": target["deployment_name"],
     }
 
 
@@ -73,11 +97,19 @@ def investigate_with_tool_node(state: IncidentState) -> dict[str, Any]:
             "next_tool": None, "next_tool_reason": None}
 
 
+def retrieve_knowledge_node(state: IncidentState) -> dict[str, Any]:
+    incident = state.get("incident")
+    if incident is None:
+        raise ValueError("Knowledge retrieval requires collected incident evidence.")
+    return {"knowledge_documents": retrieve_operational_knowledge(incident, state.get("hypotheses", []))}
+
+
 def diagnose_node(state: IncidentState) -> dict[str, Any]:
     incident = state.get("incident")
     if incident is None:
         raise ValueError("Diagnosis requires collected incident evidence.")
-    return {"diagnosis": diagnose_with_llm(incident)}
+    diagnosis = diagnose_with_llm(incident, knowledge_documents=state.get("knowledge_documents", []))
+    return {"diagnosis": diagnosis, "resolved": diagnosis.root_cause == "no_active_incident"}
 
 
 def plan_remediation_node(state: IncidentState) -> dict[str, Any]:
@@ -133,6 +165,11 @@ def execute_node(state: IncidentState) -> dict[str, Any]:
             "success": False, "supported": False, "action": plan.action,
             "reason": "Real execution is not implemented for this action yet.",
         }}
+    elif (state.get("incident") is not None and (
+            state["incident"].namespace != "operion-sandbox"
+            or state["incident"].service != "payment-service"
+            or (state["incident"].deployment_name or state["incident"].service) != "payment-service")):
+        reason = "The selected incident is outside the supported remediation target."
     else:
         parameters = decision.normalized_parameters
         if (parameters.get("name") != "PAYMENT_PROVIDER_URL"
