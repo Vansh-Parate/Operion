@@ -31,8 +31,13 @@ def incident(*, ready=True, warning_age=2400, waiting=None):
                                                "message": "Readiness probe failed: connection refused",
                                                "last_timestamp": (observed_at - timedelta(seconds=warning_age)).isoformat(),
                                                "involved_object_name": "payment-service-1"}, now=observed_at))
+    service = Evidence(source="kubernetes", category="service_config", summary="Service selects payment-service",
+                       data={"name": "payment-service", "selector": {"app": "payment-service"}})
+    endpoints = Evidence(source="kubernetes", category="endpoints", summary="Service has a ready endpoint",
+                         data={"name": "payment-service", "ready_addresses": ["10.0.0.10"]})
+    pod.data["labels"] = {"app": "payment-service"}
     return IncidentContext(incident_id="I", namespace="operion-sandbox", service="payment-service",
-                           evidence=[pod, event])
+                           evidence=[pod, event, service, endpoints])
 
 
 def test_healthy_current_state_overrides_old_warning(monkeypatch):
@@ -49,14 +54,14 @@ def test_healthy_current_state_overrides_old_warning(monkeypatch):
     assert diagnosis.recommended_actions == []
     assert create_remediation_plan(diagnosis).action == "none"
     post.assert_not_called()
-    assert len(case.evidence) == 2
+    assert len(case.evidence) == 4
 
 
 def test_recent_unready_and_current_crash_not_suppressed(monkeypatch):
     unready = incident(ready=False, warning_age=30)
     assert assess_current_workload_health(unready).active_failure_observed
     response = Mock()
-    response.json.return_value = {"response": '{"root_cause":"readiness_probe_failure","confidence":0.8,"summary":"Currently unready","supporting_evidence":["E1: Pod Ready=False"]}'}
+    response.json.return_value = {"response": '{"root_cause":"readiness_probe_failure","confidence":0.8,"summary":"Currently unready","supporting_evidence":["E1: Pod Ready=False", "E2: Recent readiness probe failed"]}'}
     monkeypatch.setattr(llm_diagnosis.requests, "post", Mock(return_value=response))
     assert llm_diagnosis.diagnose_with_llm(unready, knowledge_documents=[]).root_cause == "readiness_probe_failure"
     crash = incident(ready=False, waiting="CrashLoopBackOff")

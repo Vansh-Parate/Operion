@@ -34,6 +34,10 @@ is not proof of a current incident. If it conflicts with a healthy Pod, keep it 
 Never mark evidence sufficient for an active failure solely from an old warning.
 If current health is unclear, collect fresh Pod status. For a possible current readiness failure
 with unknown readiness, prefer get_pod_status.
+Assess Pods and Service routing separately. Running and Ready Pods alone do not establish
+a healthy service. For a service-backed target, inspect get_service and get_endpoints
+before concluding no active incident. Zero ready endpoints is an active routing symptom.
+Compare the Service selector with observed Pod labels when both are available.
 If insufficient, select exactly one smallest useful read-only tool from:
 {', '.join(INVESTIGATION_TOOLS)}.
 Consider previous calls and outcomes. Avoid choosing a tool called repeatedly without a new reason.
@@ -63,11 +67,24 @@ def generate_investigation_decision(incident: IncidentContext,
             raise ValueError("Investigation cited an evidence ID outside this incident.")
     health = assess_current_workload_health(incident)
     top_readiness = bool(decision.hypotheses and "readiness" in decision.hypotheses[0].cause.lower())
-    if (top_readiness and not health.currently_healthy and not health.active_failure_observed
+    if (top_readiness and health.pod_health == "unknown"
             and not any(record.tool == "get_pod_status" for record in tool_history)):
         return decision.model_copy(update={"sufficient_evidence": False,
                                            "next_tool": "get_pod_status",
                                            "next_tool_reason": "Check current Pod readiness before diagnosing a historical warning."})
+    attempted = {record.tool for record in tool_history}
+    has_service = any(item.source == "kubernetes" and item.category == "service_config"
+                      and item.data.get("name") == incident.service
+                      for item in incident.evidence)
+    has_endpoints = any(item.source == "kubernetes"
+                        and item.category in {"endpoints", "endpoint_slices", "service_endpoints"}
+                        for item in incident.evidence)
+    if not has_service and "get_service" not in attempted:
+        return decision.model_copy(update={"sufficient_evidence": False, "next_tool": "get_service",
+                                           "next_tool_reason": "Check current Service selector and configuration."})
+    if not has_endpoints and "get_endpoints" not in attempted:
+        return decision.model_copy(update={"sufficient_evidence": False, "next_tool": "get_endpoints",
+                                           "next_tool_reason": "Check current Service endpoints before assessing routing health."})
     if decision.sufficient_evidence:
         return decision.model_copy(update={"next_tool": None, "next_tool_reason": None})
     if decision.next_tool is not None and decision.next_tool not in INVESTIGATION_TOOLS:

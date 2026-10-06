@@ -5,6 +5,17 @@ from app.services.temporal import annotate_event_data, assess_current_workload_h
 
 def diagnose_incident(incident: IncidentContext) -> Diagnosis:
     health = assess_current_workload_health(incident)
+    if health.selector_mismatch_observed or health.zero_ready_endpoints_observed:
+        mismatch = health.selector_mismatch_observed
+        return Diagnosis(
+            root_cause="service_selector_mismatch" if mismatch else "service_routing_failure",
+            confidence=0.9 if mismatch and health.zero_ready_endpoints_observed else 0.75,
+            summary=("Service selector does not match observed Pod labels and the Service has zero ready endpoints."
+                     if mismatch and health.zero_ready_endpoints_observed else
+                     "Service has zero ready endpoints; its routing cause is not established."
+                     if health.zero_ready_endpoints_observed else
+                     "Service selector does not match observed Pod labels."),
+            recommended_actions=[])
     if health.currently_healthy and not health.active_failure_observed:
         has_history = any(item.category == "kubernetes_event" and
                           annotate_event_data(item.data).get("temporal_status") == "historical"

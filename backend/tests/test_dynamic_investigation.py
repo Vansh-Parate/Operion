@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from app.agent import investigation_tools as tools, investigator, nodes
 from app.agent.graph import MAX_INVESTIGATION_ITERATIONS, build_incident_graph, route_after_hypotheses
 from app.agent.investigation_models import Hypothesis, InvestigationDecision, ToolCallRecord
+from app.agent.models import RemediationProposal
 from app.models.diagnosis import Diagnosis
 from app.models.evidence import Evidence
 from app.models.incident import IncidentContext
@@ -124,6 +125,9 @@ def test_graph_stops_at_max_with_supplied_unknown_incident(monkeypatch, incident
     monkeypatch.setattr(nodes, "execute_investigation_tool", tool)
     monkeypatch.setattr(nodes, "diagnose_with_llm", diagnose)
     monkeypatch.setattr(nodes, "retrieve_operational_knowledge", Mock(return_value=[]))
+    monkeypatch.setattr(nodes, "generate_remediation_proposal", Mock(return_value=RemediationProposal(abstain=True)))
+    monkeypatch.setattr(nodes, "check_investigation_completeness_node",
+                        Mock(return_value={"investigation_complete": True}))
     result = build_incident_graph().invoke({"incident": incident, "approved": False})
     assert result["investigation_iteration"] == 5
     assert tool.call_count == 5
@@ -179,6 +183,9 @@ def test_graph_continues_existing_remediation_pipeline(monkeypatch, incident):
     monkeypatch.setattr(nodes, "execute_investigation_tool", tool)
     monkeypatch.setattr(nodes, "diagnose_with_llm", diagnose)
     monkeypatch.setattr(nodes, "retrieve_operational_knowledge", Mock(return_value=[]))
+    monkeypatch.setattr(nodes, "generate_remediation_proposal", Mock(return_value=RemediationProposal(abstain=True)))
+    monkeypatch.setattr(nodes, "check_investigation_completeness_node",
+                        Mock(return_value={"investigation_complete": True}))
     result = build_incident_graph().invoke({"approved": False})
     assert result["investigation_iteration"] == 1
     assert len(result["incident"].evidence) == 3

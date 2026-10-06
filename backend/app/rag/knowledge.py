@@ -52,7 +52,11 @@ def retrieve_operational_knowledge(incident: IncidentContext,
         if index < len(docs):
             combined.append(docs[index])
     distinct = []
+    seen_sources = set()
     for item in combined:
+        source_key = (item.source_type, item.title)
+        if source_key in seen_sources:
+            continue
         words = set(re.findall(r"[a-z0-9]+", item.content.lower()))
         duplicate = False
         for prior in distinct:
@@ -64,6 +68,7 @@ def retrieve_operational_knowledge(incident: IncidentContext,
                 break
         if not duplicate:
             distinct.append(item)
+            seen_sources.add(source_key)
         if len(distinct) == 5:
             break
     return distinct

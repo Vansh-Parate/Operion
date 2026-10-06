@@ -8,6 +8,11 @@ MAX_INVESTIGATION_ITERATIONS = 5
 
 
 def route_after_hypotheses(state: IncidentState) -> str:
+    if state.get("investigation_complete") is False:
+        if (state.get("next_tool") is not None
+                and state.get("investigation_iteration", 0) < MAX_INVESTIGATION_ITERATIONS):
+            return "investigate_with_tool"
+        return END
     if state.get("sufficient_evidence", False):
         return "retrieve_knowledge"
     if (state.get("next_tool") is not None
@@ -19,7 +24,7 @@ def route_after_hypotheses(state: IncidentState) -> str:
 def route_after_policy(state: IncidentState) -> str:
     plan = state.get("remediation_plan")
     decision = state.get("policy_decision")
-    if plan is None or plan.action == "none" or decision is None or not decision.allowed:
+    if plan is None or plan.action != "patch_environment_variable" or decision is None or not decision.allowed:
         return END
     return "approval"
 
@@ -38,9 +43,12 @@ def build_incident_graph() -> CompiledStateGraph:
     graph = StateGraph(IncidentState)
     graph.add_node("collect_evidence", nodes.collect_evidence_node)
     graph.add_node("generate_hypotheses", nodes.generate_hypotheses_node)
+    graph.add_node("check_investigation_completeness", nodes.check_investigation_completeness_node)
     graph.add_node("investigate_with_tool", nodes.investigate_with_tool_node)
     graph.add_node("retrieve_knowledge", nodes.retrieve_knowledge_node)
     graph.add_node("diagnose", nodes.diagnose_node)
+    graph.add_node("generate_remediation_proposal", nodes.generate_remediation_proposal_node)
+    graph.add_node("validate_remediation_proposal", nodes.validate_remediation_proposal_node)
     graph.add_node("plan_remediation", nodes.plan_remediation_node)
     graph.add_node("validate_policy", nodes.validate_policy_node)
     graph.add_node("approval", nodes.approval_node)
@@ -48,11 +56,14 @@ def build_incident_graph() -> CompiledStateGraph:
     graph.add_node("verify", nodes.verify_node)
     graph.add_edge(START, "collect_evidence")
     graph.add_edge("collect_evidence", "generate_hypotheses")
-    graph.add_conditional_edges("generate_hypotheses", route_after_hypotheses,
-                                {"retrieve_knowledge": "retrieve_knowledge", "investigate_with_tool": "investigate_with_tool"})
+    graph.add_edge("generate_hypotheses", "check_investigation_completeness")
+    graph.add_conditional_edges("check_investigation_completeness", route_after_hypotheses,
+                                {"retrieve_knowledge": "retrieve_knowledge", "investigate_with_tool": "investigate_with_tool", END: END})
     graph.add_edge("investigate_with_tool", "generate_hypotheses")
     graph.add_edge("retrieve_knowledge", "diagnose")
-    graph.add_edge("diagnose", "plan_remediation")
+    graph.add_edge("diagnose", "generate_remediation_proposal")
+    graph.add_edge("generate_remediation_proposal", "validate_remediation_proposal")
+    graph.add_edge("validate_remediation_proposal", "plan_remediation")
     graph.add_edge("plan_remediation", "validate_policy")
     graph.add_conditional_edges("validate_policy", route_after_policy, {END: END, "approval": "approval"})
     graph.add_conditional_edges("approval", route_after_approval, {END: END, "execute": "execute"})

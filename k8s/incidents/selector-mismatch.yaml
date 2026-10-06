@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: selector-demo
+  namespace: operion-sandbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: selector-demo
+  template:
+    metadata:
+      labels:
+        app: selector-demo
+    spec:
+      containers:
+        - name: selector-demo
+          image: nginx:alpine
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: selector-demo
+  namespace: operion-sandbox
+spec:
+  selector:
+    app: wrong-label
+  ports:
+    - port: 80
+      targetPort: 80

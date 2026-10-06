@@ -86,6 +86,7 @@ def get_pod_status(incident: IncidentContext) -> list[Evidence]:
         pod_ready = (ready_condition.status in ("True", True)) if ready_condition is not None else None
         data = {"pod_name": pod.metadata.name, "phase": pod.status.phase,
                 "observation_type": "current_state", "observed_at": datetime.now(timezone.utc).isoformat(),
+                "labels": dict(getattr(pod.metadata, "labels", None) or {}),
                 "pod_ready_condition": pod_ready, "containers": statuses,
                 **{k: v for k, v in primary.items() if k != "name"}}
         result.append(_evidence(incident, "pod_status",
@@ -218,7 +219,7 @@ def get_endpoints(incident: IncidentContext) -> list[Evidence]:
         ready.extend(address.ip for address in subset.addresses or [])
         not_ready.extend(address.ip for address in subset.not_ready_addresses or [])
     return [_evidence(incident, "endpoints", f"Endpoints for service {service}",
-                      {"ready_addresses": ready, "not_ready_addresses": not_ready},
+                      {"name": service, "ready_addresses": ready, "not_ready_addresses": not_ready},
                       f"endpoints/{service}")]
 
 
@@ -288,6 +289,10 @@ def merge_evidence(incident: IncidentContext, new_evidence: list[Evidence]) -> I
         if item.category == "pod_status" and item.data.get("pod_name"):
             merged = [old for old in merged if not (
                 old.category == "pod_status" and old.data.get("pod_name") == item.data["pod_name"]
+                and old.namespace == item.namespace)]
+        if item.category in {"service_config", "endpoints", "endpoint_slices", "service_endpoints"}:
+            merged = [old for old in merged if not (
+                old.category == item.category and old.reference == item.reference
                 and old.namespace == item.namespace)]
         seen = {_identity(old) for old in merged}
         identity = _identity(item)

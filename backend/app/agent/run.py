@@ -3,6 +3,7 @@ import json
 
 from app.agent.graph import build_incident_graph
 from app.agent.state import IncidentState
+from app.services.temporal import assess_current_workload_health
 
 
 def main() -> None:
@@ -45,6 +46,33 @@ def main() -> None:
     print("\nRetrieved operational knowledge:")
     for index, item in enumerate(state.get("knowledge_documents", []), start=1):
         print(f"{index}. [{item.source_type}] {item.title}")
+    proposal = state.get("remediation_proposal")
+    decisions = state.get("proposal_decisions", [])
+    if proposal is not None and proposal.fallback_used:
+        print("\nRemediation proposal generated using deterministic fallback")
+        if proposal.generation_status == "llm_timeout":
+            print("because the local remediation model timed out.")
+        else:
+            print("because the local remediation model returned an unusable intent.")
+    if proposal is not None:
+        print(f"Remediation generation: status={proposal.generation_status or 'unknown'}, latency_ms={proposal.generation_latency_ms or 0}, fallback_used={proposal.fallback_used}")
+    if proposal is not None and proposal.abstain:
+        print(f"\nNo safe remediation proposed.\nReason: {proposal.abstain_reason or 'Insufficient support.'}")
+    elif proposal is not None:
+        print("\nRemediation candidates:")
+        for index, candidate in enumerate(proposal.candidates, start=1):
+            operation = candidate.operation
+            decision = decisions[index - 1] if index - 1 < len(decisions) else None
+            target = operation.target
+            print(f"{index}. Operation: {operation.operation}")
+            print(f"   Risk: {decision.risk_level if decision else candidate.risk_level}")
+            print(f"   Target: {f'{target.kind}/{target.name}' if target else 'none'}")
+            print(f"   Reason: {operation.reason}")
+            print(f"   Evidence: {', '.join(operation.evidence_ids)}")
+            print(f"   Knowledge: {', '.join(operation.knowledge_ids)}")
+            print(f"   Executable now: {'yes' if decision and decision.executable_now else 'no'}")
+        recommended = proposal.recommended_candidate_index
+        print(f"Recommended candidate: {recommended + 1 if recommended is not None else 'none'}")
     for label, key in (
         ("Diagnosis", "diagnosis"), ("Remediation plan", "remediation_plan"),
         ("Policy decision", "policy_decision"),
@@ -54,6 +82,12 @@ def main() -> None:
         print(value.model_dump_json(indent=2) if value is not None else "None")
     execution = state.get("execution_result")
     diagnosis = state.get("diagnosis")
+    incident = state.get("incident")
+    if incident is not None:
+        health = assess_current_workload_health(incident)
+        print(f"\nCurrent health: Pods={health.pod_health}, Service={health.service_health}")
+    if state.get("investigation_complete") is False:
+        print(f"Investigation incomplete: {state.get('investigation_blocked_reason') or 'Required Service routing evidence is unavailable.'}")
     print(f"\nCurrent workload: {'healthy; no action required' if diagnosis is not None and diagnosis.root_cause == 'no_active_incident' else 'see diagnosis'}")
     print(f"\nExecution happened: {execution is not None}")
     print(f"Execution result: {json.dumps(execution)}")

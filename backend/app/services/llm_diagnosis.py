@@ -6,6 +6,7 @@ from app.models.diagnosis import Diagnosis
 from app.models.incident import IncidentContext
 from app.models.knowledge import KnowledgeDocument
 from app.services.temporal import annotate_event_data, assess_current_workload_health
+from app.services.diagnosis_validation import validate_diagnosis
 
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -117,7 +118,14 @@ STRICT RULES:
 - Current Pod and container health overrides stale warning events unless continuing failure is observed.
 - Never say a workload remains unhealthy based on a historical event alone.
 - If current and historical evidence conflict, lower confidence.
-- If currently Running and Ready with only historical warnings, return no_active_incident.
+- Assess Pod health and Service routing separately. Running and Ready Pods alone are
+  insufficient for no_active_incident on a service-backed target.
+- Require observed Service configuration and ready Endpoints/EndpointSlices before
+  concluding the service is currently healthy.
+- Zero ready endpoints is an active routing problem even when Pods are Ready.
+- Compare Service selector with observed Pod labels before claiming a mismatch.
+- If Pods and Service routing are healthy and only historical warnings remain,
+  return no_active_incident.
 
 SUPPORTING EVIDENCE RULES:
 - supporting_evidence must contain only facts explicitly present in the numbered evidence.
@@ -138,6 +146,7 @@ ROOT CAUSE SELECTION:
 - missing_environment_variable requires explicit evidence that a required variable is missing.
 - service_selector_mismatch requires evidence comparing the Service selector with Pod labels.
 - no_active_incident means current workload health is observed and no active failure is established.
+- service_routing_failure means a Service has zero ready endpoints, with cause not yet proven.
 
 
 Only use the following root_cause values:
@@ -147,6 +156,7 @@ Only use the following root_cause values:
 - readiness_probe_failure
 - redis_dependency_unavailable
 - service_selector_mismatch
+- service_routing_failure
 - no_active_incident
 - unknown
 
@@ -195,6 +205,21 @@ def diagnose_with_llm(
     runbooks: list[dict] | None = None,
 ) -> Diagnosis:
     health = assess_current_workload_health(incident)
+    if health.selector_mismatch_observed or health.zero_ready_endpoints_observed:
+        service_refs = [f"E{index}: {item.summary}"
+                        for index, item in enumerate(incident.evidence, start=1)
+                        if item.category in {"service_config", "endpoints", "endpoint_slices", "service_endpoints",
+                                             "pod_status", "deployment_config"}]
+        mismatch = health.selector_mismatch_observed
+        return Diagnosis(
+            root_cause="service_selector_mismatch" if mismatch else "service_routing_failure",
+            confidence=0.9 if mismatch and health.zero_ready_endpoints_observed else 0.75,
+            summary=("The Service selector does not match observed Pod labels and the Service has no ready endpoints."
+                     if mismatch and health.zero_ready_endpoints_observed else
+                     "The Service has zero ready endpoints; the routing cause is not yet established."
+                     if health.zero_ready_endpoints_observed else
+                     "The Service selector does not match observed Pod labels."),
+            supporting_evidence=service_refs, recommended_actions=[])
     if health.currently_healthy and not health.active_failure_observed:
         pod_ids = [f"E{index}: {item.summary}; Pod Ready=True."
                    for index, item in enumerate(incident.evidence, start=1)
@@ -253,10 +278,4 @@ def diagnose_with_llm(
         ),
     )
 
-    if health.currently_healthy and diagnosis.root_cause == "readiness_probe_failure":
-        diagnosis = diagnosis.model_copy(update={"root_cause": "unknown",
-                                         "confidence": min(diagnosis.confidence, 0.4),
-                                         "summary": "Current Pods are Ready; an active readiness failure is not established.",
-                                         "supporting_evidence": [], "recommended_actions": []})
-
-    return diagnosis
+    return validate_diagnosis(incident, diagnosis)

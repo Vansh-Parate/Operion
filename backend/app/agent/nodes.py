@@ -1,6 +1,10 @@
 from typing import Any
 
 from app.agent.planner import create_remediation_plan
+from app.agent.completeness import assess_investigation_completeness
+from app.agent.models import RemediationPlan, RemediationProposal
+from app.agent.proposal_policy import validate_remediation_proposal
+from app.agent.remediation_generator import generate_remediation_proposal
 from app.agent.investigation_models import ToolCallRecord
 from app.agent.investigation_tools import execute_investigation_tool, merge_evidence
 from app.agent.investigator import generate_investigation_decision
@@ -14,6 +18,7 @@ from app.models.incident import IncidentContext
 from app.rag.knowledge import retrieve_operational_knowledge
 from app.services.investigation import collect_incident_context
 from app.services.llm_diagnosis import diagnose_with_llm
+from app.services.diagnosis_validation import validate_diagnosis
 
 
 def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
@@ -42,6 +47,8 @@ def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
         "iteration": state.get("iteration", 0) + 1,
         "diagnosis": None,
         "remediation_plan": None,
+        "remediation_proposal": None,
+        "proposal_decisions": [],
         "policy_decision": None,
         "approved": state.get("approved", False) is True and state.get("iteration", 0) == 0,
         "execution_result": None,
@@ -54,6 +61,8 @@ def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
         "tool_history": [],
         "investigation_iteration": 0,
         "sufficient_evidence": False,
+        "investigation_complete": False,
+        "investigation_blocked_reason": None,
         "target_namespace": target["namespace"],
         "target_service": target["service"],
         "target_label_selector": target["label_selector"],
@@ -74,6 +83,21 @@ def generate_hypotheses_node(state: IncidentState) -> dict[str, Any]:
     return {"hypotheses": decision.hypotheses, "next_tool": decision.next_tool,
             "next_tool_reason": decision.next_tool_reason,
             "sufficient_evidence": decision.sufficient_evidence}
+
+
+def check_investigation_completeness_node(state: IncidentState) -> dict[str, Any]:
+    incident = state.get("incident")
+    if incident is None:
+        raise ValueError("Completeness check requires collected incident evidence.")
+    assessment = assess_investigation_completeness(incident, state.get("tool_history", []))
+    if assessment.complete:
+        return {"investigation_complete": True, "investigation_blocked_reason": None}
+    if assessment.next_tool is not None:
+        return {"investigation_complete": False, "investigation_blocked_reason": assessment.reason,
+                "sufficient_evidence": False, "next_tool": assessment.next_tool,
+                "next_tool_reason": assessment.reason}
+    return {"investigation_complete": False, "investigation_blocked_reason": assessment.reason,
+            "sufficient_evidence": False, "next_tool": None, "next_tool_reason": None}
 
 
 def investigate_with_tool_node(state: IncidentState) -> dict[str, Any]:
@@ -109,14 +133,67 @@ def diagnose_node(state: IncidentState) -> dict[str, Any]:
     if incident is None:
         raise ValueError("Diagnosis requires collected incident evidence.")
     diagnosis = diagnose_with_llm(incident, knowledge_documents=state.get("knowledge_documents", []))
+    diagnosis = validate_diagnosis(incident, diagnosis)
     return {"diagnosis": diagnosis, "resolved": diagnosis.root_cause == "no_active_incident"}
+
+
+def generate_remediation_proposal_node(state: IncidentState) -> dict[str, Any]:
+    incident = state.get("incident")
+    diagnosis = state.get("diagnosis")
+    if incident is None or diagnosis is None:
+        raise ValueError("Remediation proposal requires incident evidence and diagnosis.")
+    try:
+        generated = generate_remediation_proposal(
+            incident, state.get("hypotheses", []), diagnosis,
+            state.get("knowledge_documents", []), return_metadata=True)
+        if isinstance(generated, tuple):
+            proposal, metadata = generated
+        else:
+            proposal, metadata = generated, {"status": "llm_success", "fallback_used": False}
+    except Exception:
+        proposal = RemediationProposal(abstain=True,
+                                       abstain_reason="Remediation generation failed safely.")
+        metadata = {"status": "failed", "fallback_used": False}
+    proposal = proposal.model_copy(update={
+        "generation_status": metadata.get("status", "unknown"),
+        "generation_latency_ms": metadata.get("latency_ms", 0),
+        "fallback_used": metadata.get("fallback_used", False),
+    })
+    return {"remediation_proposal": proposal}
+
+
+def validate_remediation_proposal_node(state: IncidentState) -> dict[str, Any]:
+    incident = state.get("incident")
+    proposal = state.get("remediation_proposal")
+    if incident is None or proposal is None:
+        raise ValueError("Proposal validation requires incident evidence and a proposal.")
+    try:
+        checked, decisions = validate_remediation_proposal(
+            proposal, incident, state.get("knowledge_documents", []))
+    except Exception:
+        checked = RemediationProposal(abstain=True,
+                                      abstain_reason="Proposal validation failed safely.")
+        decisions = []
+    return {"remediation_proposal": checked, "proposal_decisions": decisions}
 
 
 def plan_remediation_node(state: IncidentState) -> dict[str, Any]:
     diagnosis = state.get("diagnosis")
     if diagnosis is None:
         raise ValueError("Remediation planning requires a diagnosis.")
-    return {"remediation_plan": create_remediation_plan(diagnosis)}
+    legacy = create_remediation_plan(diagnosis)
+    if "remediation_proposal" not in state or legacy.action == "patch_environment_variable":
+        # The existing payment-service repair still passes its strict policy gate.
+        return {"remediation_plan": legacy}
+    proposal = state.get("remediation_proposal")
+    if proposal is not None and proposal.candidates:
+        reason = "Structured remediation candidates are recommendations only; no generic execution is available."
+    elif proposal is not None and proposal.abstain:
+        reason = proposal.abstain_reason or "No safe remediation was proposed."
+    else:
+        reason = legacy.reason
+    return {"remediation_plan": RemediationPlan(action="none", reason=reason,
+                                                requires_approval=False)}
 
 
 def extract_current_memory_limit(incident: IncidentContext) -> str | None:
