@@ -1,6 +1,8 @@
 import json
 import re
+import time
 import requests
+import structlog
 
 from app.models.diagnosis import Diagnosis
 from app.models.incident import IncidentContext
@@ -11,6 +13,14 @@ from app.services.diagnosis_validation import validate_diagnosis
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2.5:1.5b"
+OLLAMA_TIMEOUT_SECONDS = 30
+logger = structlog.get_logger(__name__)
+
+
+def _stage_log(status: str, started: float, *, fallback_used: bool = False) -> None:
+    logger.info("model_stage_completed", stage="diagnosis", model=OLLAMA_MODEL,
+                latency_ms=round((time.perf_counter() - started) * 1000),
+                status=status, fallback_used=fallback_used)
 
 
 def build_retrieval_query(incident: IncidentContext) -> str:
@@ -204,6 +214,8 @@ def diagnose_with_llm(
     *,
     runbooks: list[dict] | None = None,
 ) -> Diagnosis:
+    started = time.perf_counter()
+    logger.info("model_stage_started", stage="diagnosis", model=OLLAMA_MODEL)
     health = assess_current_workload_health(incident)
     if health.selector_mismatch_observed or health.zero_ready_endpoints_observed:
         service_refs = [f"E{index}: {item.summary}"
@@ -211,7 +223,7 @@ def diagnose_with_llm(
                         if item.category in {"service_config", "endpoints", "endpoint_slices", "service_endpoints",
                                              "pod_status", "deployment_config"}]
         mismatch = health.selector_mismatch_observed
-        return Diagnosis(
+        result = Diagnosis(
             root_cause="service_selector_mismatch" if mismatch else "service_routing_failure",
             confidence=0.9 if mismatch and health.zero_ready_endpoints_observed else 0.75,
             summary=("The Service selector does not match observed Pod labels and the Service has no ready endpoints."
@@ -220,6 +232,8 @@ def diagnose_with_llm(
                      if health.zero_ready_endpoints_observed else
                      "The Service selector does not match observed Pod labels."),
             supporting_evidence=service_refs, recommended_actions=[])
+        _stage_log("deterministic_bypass", started)
+        return result
     if health.currently_healthy and not health.active_failure_observed:
         pod_ids = [f"E{index}: {item.summary}; Pod Ready=True."
                    for index, item in enumerate(incident.evidence, start=1)
@@ -230,9 +244,11 @@ def diagnose_with_llm(
                           and annotate_event_data(item.data).get("temporal_status") == "historical"]
         summary = ("Historical warnings were observed, but the workload is currently Running and Ready."
                    if historical_ids else "The workload is currently Running and Ready; no active incident is observed.")
-        return Diagnosis(root_cause="no_active_incident", confidence=0.95,
+        result = Diagnosis(root_cause="no_active_incident", confidence=0.95,
                          summary=summary,
                          supporting_evidence=pod_ids + historical_ids[:2], recommended_actions=[])
+        _stage_log("deterministic_bypass", started)
+        return result
     if knowledge_documents is None:
         knowledge_documents = _as_knowledge(
             runbooks if runbooks is not None else retrieve_runbooks(build_retrieval_query(incident), top_k=3))
@@ -242,24 +258,23 @@ def diagnose_with_llm(
         knowledge_documents=knowledge_documents or [],
     )
 
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-        },
-        timeout=300,
-    )
-
-    response.raise_for_status()
-
-    result = response.json()
-
-    parsed = json.loads(
-        result["response"]
-    )
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"},
+            timeout=OLLAMA_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        result = response.json()
+        parsed = json.loads(result["response"])
+    except requests.Timeout:
+        _stage_log("timeout", started)
+        raise
+    except (requests.RequestException, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.info("model_stage_completed", stage="diagnosis", model=OLLAMA_MODEL,
+                    latency_ms=round((time.perf_counter() - started) * 1000),
+                    status="invalid", fallback_used=False, error_type=type(exc).__name__)
+        raise
 
     valid_evidence_ids = {f"E{index}" for index in range(1, len(incident.evidence) + 1)}
     supporting_evidence = [item for item in parsed.get("supporting_evidence", [])
@@ -278,4 +293,6 @@ def diagnose_with_llm(
         ),
     )
 
-    return validate_diagnosis(incident, diagnosis)
+    result = validate_diagnosis(incident, diagnosis)
+    _stage_log("success", started)
+    return result

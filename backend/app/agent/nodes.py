@@ -1,4 +1,6 @@
 from typing import Any
+import requests
+import structlog
 
 from app.agent.planner import create_remediation_plan
 from app.agent.completeness import assess_investigation_completeness
@@ -17,8 +19,11 @@ from app.agent.tools import (
 from app.models.incident import IncidentContext
 from app.rag.knowledge import retrieve_operational_knowledge
 from app.services.investigation import collect_incident_context
+from app.services.diagnosis import diagnose_incident
 from app.services.llm_diagnosis import diagnose_with_llm
 from app.services.diagnosis_validation import validate_diagnosis
+
+logger = structlog.get_logger(__name__)
 
 
 def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
@@ -63,6 +68,7 @@ def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
         "sufficient_evidence": False,
         "investigation_complete": False,
         "investigation_blocked_reason": None,
+        "investigation_model_failed": False,
         "target_namespace": target["namespace"],
         "target_service": target["service"],
         "target_label_selector": target["label_selector"],
@@ -76,10 +82,15 @@ def generate_hypotheses_node(state: IncidentState) -> dict[str, Any]:
         raise ValueError("Investigation requires collected incident evidence.")
     try:
         decision = generate_investigation_decision(incident, state.get("tool_history", []))
-    except Exception:
-        # Preserve the existing diagnosis pipeline if the local model is unavailable.
+    except Exception as exc:
+        # A model failure must not trigger another investigation loop. The
+        # completeness gate remains authoritative for all successful calls.
+        logger.info("model_stage_fallback", stage="investigation", status=
+                    "timeout" if isinstance(exc, requests.Timeout) else "invalid",
+                    fallback_used=False)
         return {"hypotheses": state.get("hypotheses", []), "next_tool": None,
-                "next_tool_reason": None, "sufficient_evidence": False}
+                "next_tool_reason": None, "sufficient_evidence": False,
+                "investigation_model_failed": True}
     return {"hypotheses": decision.hypotheses, "next_tool": decision.next_tool,
             "next_tool_reason": decision.next_tool_reason,
             "sufficient_evidence": decision.sufficient_evidence}
@@ -89,6 +100,10 @@ def check_investigation_completeness_node(state: IncidentState) -> dict[str, Any
     incident = state.get("incident")
     if incident is None:
         raise ValueError("Completeness check requires collected incident evidence.")
+    if state.get("investigation_model_failed"):
+        return {"investigation_complete": False,
+                "investigation_blocked_reason": "Investigation model failed; completeness could not be established.",
+                "sufficient_evidence": False, "next_tool": None, "next_tool_reason": None}
     assessment = assess_investigation_completeness(incident, state.get("tool_history", []))
     if assessment.complete:
         return {"investigation_complete": True, "investigation_blocked_reason": None}
@@ -132,7 +147,19 @@ def diagnose_node(state: IncidentState) -> dict[str, Any]:
     incident = state.get("incident")
     if incident is None:
         raise ValueError("Diagnosis requires collected incident evidence.")
-    diagnosis = diagnose_with_llm(incident, knowledge_documents=state.get("knowledge_documents", []))
+    try:
+        diagnosis = diagnose_with_llm(incident, knowledge_documents=state.get("knowledge_documents", []))
+    except Exception as exc:
+        deterministic = validate_diagnosis(incident, diagnose_incident(incident))
+        supported = deterministic.root_cause not in {None, "unknown"}
+        logger.info("model_stage_fallback", stage="diagnosis",
+                    status="timeout" if isinstance(exc, requests.Timeout) else "invalid",
+                    fallback_used=supported)
+        diagnosis = deterministic if supported else deterministic.model_copy(update={
+            "root_cause": "unknown", "confidence": 0.0,
+            "summary": "Diagnosis model failed and deterministic evidence is insufficient.",
+            "supporting_evidence": [], "recommended_actions": [],
+        })
     diagnosis = validate_diagnosis(incident, diagnosis)
     return {"diagnosis": diagnosis, "resolved": diagnosis.root_cause == "no_active_incident"}
 

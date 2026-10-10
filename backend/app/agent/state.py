@@ -26,6 +26,7 @@ class IncidentState(TypedDict):
     sufficient_evidence: NotRequired[bool]
     investigation_complete: NotRequired[bool]
     investigation_blocked_reason: NotRequired[str | None]
+    investigation_model_failed: NotRequired[bool]
     knowledge_documents: NotRequired[list[KnowledgeDocument]]
     remediation_proposal: NotRequired[RemediationProposal | None]
     proposal_decisions: NotRequired[list[ProposalDecision]]

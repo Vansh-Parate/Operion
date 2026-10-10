@@ -1,14 +1,25 @@
 """Hypothesis generation and evidence selection; no remediation decisions."""
 
 import json
+import time
 
 import requests
+import structlog
 
 from app.agent.investigation_models import InvestigationDecision, ToolCallRecord
 from app.agent.investigation_tools import INVESTIGATION_TOOLS
 from app.models.incident import IncidentContext
 from app.services.temporal import assess_current_workload_health
 from app.services.llm_diagnosis import OLLAMA_MODEL, OLLAMA_URL
+
+INVESTIGATION_TIMEOUT_SECONDS = 30
+logger = structlog.get_logger(__name__)
+
+
+def _completed(started: float, status: str = "success") -> None:
+    logger.info("model_stage_completed", stage="investigation", model=OLLAMA_MODEL,
+                latency_ms=round((time.perf_counter() - started) * 1000),
+                status=status, fallback_used=False)
 
 
 def build_investigation_prompt(incident: IncidentContext,
@@ -54,13 +65,26 @@ Tool history: {json.dumps(history)}"""
 
 def generate_investigation_decision(incident: IncidentContext,
                                     tool_history: list[ToolCallRecord]) -> InvestigationDecision:
-    response = requests.post(OLLAMA_URL, json={
-        "model": OLLAMA_MODEL,
-        "prompt": build_investigation_prompt(incident, tool_history),
-        "stream": False, "format": "json",
-    }, timeout=300)
-    response.raise_for_status()
-    decision = InvestigationDecision.model_validate_json(response.json()["response"])
+    started = time.perf_counter()
+    logger.info("model_stage_started", stage="investigation", model=OLLAMA_MODEL)
+    try:
+        response = requests.post(OLLAMA_URL, json={
+            "model": OLLAMA_MODEL,
+            "prompt": build_investigation_prompt(incident, tool_history),
+            "stream": False, "format": "json",
+        }, timeout=INVESTIGATION_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        decision = InvestigationDecision.model_validate_json(response.json()["response"])
+    except requests.Timeout:
+        logger.info("model_stage_completed", stage="investigation", model=OLLAMA_MODEL,
+                    latency_ms=round((time.perf_counter() - started) * 1000),
+                    status="timeout", fallback_used=False)
+        raise
+    except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+        logger.info("model_stage_completed", stage="investigation", model=OLLAMA_MODEL,
+                    latency_ms=round((time.perf_counter() - started) * 1000),
+                    status="invalid", fallback_used=False, error_type=type(exc).__name__)
+        raise
     valid_ids = {f"E{i}" for i in range(1, len(incident.evidence) + 1)}
     for hypothesis in decision.hypotheses:
         if not set(hypothesis.supporting_evidence_ids) <= valid_ids:
@@ -69,9 +93,11 @@ def generate_investigation_decision(incident: IncidentContext,
     top_readiness = bool(decision.hypotheses and "readiness" in decision.hypotheses[0].cause.lower())
     if (top_readiness and health.pod_health == "unknown"
             and not any(record.tool == "get_pod_status" for record in tool_history)):
-        return decision.model_copy(update={"sufficient_evidence": False,
+        result = decision.model_copy(update={"sufficient_evidence": False,
                                            "next_tool": "get_pod_status",
                                            "next_tool_reason": "Check current Pod readiness before diagnosing a historical warning."})
+        _completed(started)
+        return result
     attempted = {record.tool for record in tool_history}
     has_service = any(item.source == "kubernetes" and item.category == "service_config"
                       and item.data.get("name") == incident.service
@@ -80,13 +106,19 @@ def generate_investigation_decision(incident: IncidentContext,
                         and item.category in {"endpoints", "endpoint_slices", "service_endpoints"}
                         for item in incident.evidence)
     if not has_service and "get_service" not in attempted:
-        return decision.model_copy(update={"sufficient_evidence": False, "next_tool": "get_service",
+        result = decision.model_copy(update={"sufficient_evidence": False, "next_tool": "get_service",
                                            "next_tool_reason": "Check current Service selector and configuration."})
+        _completed(started)
+        return result
     if not has_endpoints and "get_endpoints" not in attempted:
-        return decision.model_copy(update={"sufficient_evidence": False, "next_tool": "get_endpoints",
+        result = decision.model_copy(update={"sufficient_evidence": False, "next_tool": "get_endpoints",
                                            "next_tool_reason": "Check current Service endpoints before assessing routing health."})
+        _completed(started)
+        return result
     if decision.sufficient_evidence:
-        return decision.model_copy(update={"next_tool": None, "next_tool_reason": None})
+        result = decision.model_copy(update={"next_tool": None, "next_tool_reason": None})
+        _completed(started)
+        return result
     if decision.next_tool is not None and decision.next_tool not in INVESTIGATION_TOOLS:
         raise ValueError("Investigation selected an unsupported read-only tool.")
     if decision.next_tool is not None and sum(
@@ -94,5 +126,10 @@ def generate_investigation_decision(incident: IncidentContext,
         for record in tool_history
     ) >= 2:
         # Repeating the same call for the same reason cannot improve the evidence.
-        return decision.model_copy(update={"next_tool": None, "next_tool_reason": None})
+        result = decision.model_copy(update={"next_tool": None, "next_tool_reason": None})
+        _completed(started)
+        return result
+    logger.info("model_stage_completed", stage="investigation", model=OLLAMA_MODEL,
+                latency_ms=round((time.perf_counter() - started) * 1000),
+                status="success", fallback_used=False)
     return decision

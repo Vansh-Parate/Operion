@@ -89,10 +89,23 @@ def main() -> None:
     if state.get("investigation_complete") is False:
         print(f"Investigation incomplete: {state.get('investigation_blocked_reason') or 'Required Service routing evidence is unavailable.'}")
     print(f"\nCurrent workload: {'healthy; no action required' if diagnosis is not None and diagnosis.root_cause == 'no_active_incident' else 'see diagnosis'}")
-    print(f"\nExecution happened: {execution is not None}")
+    print("\nFinal status summary:")
+    print(f"Diagnosis status: {diagnosis.root_cause if diagnosis else 'unavailable'}")
+    if proposal is not None and not proposal.abstain and proposal.candidates:
+        recommendation = proposal.candidates[proposal.recommended_candidate_index or 0].operation.operation
+        print(f"Remediation recommendation: {recommendation} (recommendation-only unless an executor is available)")
+    else:
+        print("Remediation recommendation: none")
+    print(f"Execution status: {'executed' if execution is not None else 'not executed'}")
+    print(f"Execution happened: {execution is not None}")
     print(f"Execution result: {json.dumps(execution)}")
     print(f"Verification result: {json.dumps(state.get('verification_result'))}")
     print(f"Resolved: {state.get('resolved', False)}")
+    unresolved = not state.get("resolved", False)
+    if unresolved and execution is None and proposal is not None and not proposal.abstain:
+        print("Incident status: unresolved; no executable remediation is available for this recommendation.")
+    elif unresolved:
+        print("Incident status: unresolved.")
 
 
 if __name__ == "__main__":

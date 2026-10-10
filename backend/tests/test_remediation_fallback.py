@@ -53,6 +53,33 @@ def test_normal_llm_intent_is_deterministically_enriched(monkeypatch, selector_i
     assert proposal.candidates[0].operation.operation == "patch_service_selector"
 
 
+def test_selector_explanation_is_grounded_and_cannot_reverse_selector_and_labels(monkeypatch, selector_incident):
+    # Deliberately provide the common failure mode: an explanation that swaps the
+    # observed Service selector and Pod labels, and cites only endpoint evidence.
+    monkeypatch.setattr(remediation_generator.requests, "post", Mock(return_value=intent_response(
+        reason="Current Pod labels are app=wrong while the Service selector is app=selector-demo",
+        evidence_ids=["E3"])))
+    proposal = remediation_generator.generate_remediation_proposal(
+        selector_incident, [], diagnosis(), [])
+    operation = proposal.candidates[0].operation
+    assert operation.evidence_ids == ["E1", "E2", "E3"]
+    assert operation.parameters == {"selector": {"app": "selector-demo"}}
+    assert "Current Service selector {app=wrong}" in operation.reason
+    assert "observed Pod labels {app=selector-demo}" in operation.reason
+    assert "zero ready endpoints" in operation.reason
+    assert "Current Pod labels are app=wrong" not in operation.reason
+
+
+def test_selector_remediation_abstains_on_contradictory_label_evidence(selector_incident):
+    selector_incident.evidence.append(Evidence(
+        source="kubernetes", category="pod_status", summary="Conflicting labels",
+        data={"pod_name": "selector-demo-2", "labels": {"app": "another-value"}}))
+    proposal = remediation_generator.generate_remediation_proposal(
+        selector_incident, [], diagnosis(), [])
+    assert proposal.abstain
+    assert "contradictory" in (proposal.abstain_reason or "")
+
+
 @pytest.mark.parametrize("side_effect", [requests.Timeout(), ValueError("invalid json")])
 def test_llm_failure_uses_safe_selector_fallback(monkeypatch, selector_incident, side_effect):
     post = Mock(side_effect=side_effect)
