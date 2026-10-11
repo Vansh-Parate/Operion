@@ -7,6 +7,7 @@ import requests
 import structlog
 from pydantic import ValidationError
 
+from app.agent.completeness import service_routing_required
 from app.agent.investigation_models import InvestigationDecision, ToolCallRecord
 from app.agent.investigation_tools import INVESTIGATION_TOOLS
 from app.models.incident import IncidentContext
@@ -122,6 +123,9 @@ def generate_investigation_decision(incident: IncidentContext,
         _completed(started)
         return result
     attempted = {record.tool for record in tool_history}
+    if not service_routing_required(incident):
+        _completed(started)
+        return decision
     has_service = any(item.source == "kubernetes" and item.category == "service_config"
                       and item.data.get("name") == incident.service
                       for item in incident.evidence)

@@ -46,7 +46,7 @@ def annotate_event_data(data: dict, *, now: datetime | None = None) -> dict:
 
 class WorkloadHealthAssessment(BaseModel):
     pod_health: Literal["healthy", "unhealthy", "unknown"] = "unknown"
-    service_health: Literal["healthy", "unhealthy", "unknown"] = "unknown"
+    service_health: Literal["healthy", "unhealthy", "unknown", "not_applicable"] = "unknown"
     selector_mismatch_observed: bool = False
     zero_ready_endpoints_observed: bool = False
     currently_healthy: bool = False
@@ -95,11 +95,14 @@ def assess_current_workload_health(incident: IncidentContext) -> WorkloadHealthA
     service_health = "unknown"
     zero_endpoints = False
     selector_mismatch = False
-    if service is None:
+    workload_only = incident.service_applicability == "workload_only"
+    if workload_only:
+        service_health = "not_applicable"
+    elif service is None:
         reasons.append("Current Service configuration has not been observed.")
-    if endpoints is None:
+    if not workload_only and endpoints is None:
         reasons.append("Current Endpoints or EndpointSlice state has not been observed.")
-    else:
+    elif not workload_only:
         data = endpoints.data
         ready = data.get("ready_addresses")
         if ready is None:
@@ -111,7 +114,7 @@ def assess_current_workload_health(incident: IncidentContext) -> WorkloadHealthA
             reasons.append("Service has zero ready endpoints.")
         elif not isinstance(ready, list):
             reasons.append("Endpoint readiness is unknown.")
-    if service is not None:
+    if not workload_only and service is not None:
         selector = service.data.get("selector")
         if isinstance(selector, dict) and selector:
             pod_labels = [item.data.get("labels") for item in pods
@@ -155,5 +158,5 @@ def assess_current_workload_health(incident: IncidentContext) -> WorkloadHealthA
         pod_health=pod_health, service_health=service_health,
         selector_mismatch_observed=selector_mismatch,
         zero_ready_endpoints_observed=zero_endpoints,
-        currently_healthy=pod_health == "healthy" and service_health == "healthy" and not active,
+        currently_healthy=pod_health == "healthy" and service_health in {"healthy", "not_applicable"} and not active,
         active_failure_observed=active, reasons=reasons)

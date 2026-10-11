@@ -8,7 +8,7 @@ from app.agent.models import RemediationPlan, RemediationProposal
 from app.agent.proposal_policy import validate_remediation_proposal
 from app.agent.remediation_generator import generate_remediation_proposal
 from app.agent.investigation_models import ToolCallRecord
-from app.agent.investigation_tools import execute_investigation_tool, merge_evidence
+from app.agent.investigation_tools import InvestigationToolError, execute_investigation_tool, merge_evidence
 from app.agent.investigator import generate_investigation_decision
 from app.agent.policy import validate_plan
 from app.agent.state import IncidentState, MAX_INVESTIGATION_TOOL_CALLS
@@ -38,11 +38,15 @@ def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
         "deployment_name": state.get("target_deployment") if "target_deployment" in state
             else (previous.deployment_name if previous else None),
     }
+    if state.get("target_service_required", False):
+        target["service_required"] = True
     if incident is not None:
         # An explicitly supplied context owns its target, including on retries.
         target = {"namespace": incident.namespace, "service": incident.service,
                   "label_selector": incident.label_selector,
                   "deployment_name": incident.deployment_name}
+        if incident.service_required:
+            target["service_required"] = True
     # Preserve the original no-argument collector call for the default target.
     default_target = target == {"namespace": "operion-sandbox", "service": "payment-service",
                                 "label_selector": None, "deployment_name": None}
@@ -74,6 +78,7 @@ def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
         "target_service": target["service"],
         "target_label_selector": target["label_selector"],
         "target_deployment": target["deployment_name"],
+        "target_service_required": target.get("service_required", False),
     }
 
 
@@ -145,8 +150,17 @@ def investigate_with_tool_node(state: IncidentState) -> dict[str, Any]:
     reason = state.get("next_tool_reason") or "Additional evidence requested."
     try:
         updated = merge_evidence(incident, execute_investigation_tool(tool_name, incident))
+        if tool_name == "get_service":
+            updated = updated.model_copy(update={"service_applicability": "service_backed"})
         history.append(ToolCallRecord(tool=tool_name, reason=reason, success=True,
                                       evidence_added=len(updated.evidence) - len(incident.evidence)))
+    except InvestigationToolError as exc:
+        updated = incident
+        if tool_name == "get_service" and exc.not_found:
+            updated = incident.model_copy(update={
+                "service_applicability": "missing" if incident.service_required else "workload_only"
+            })
+        history.append(ToolCallRecord(tool=tool_name, reason=reason, success=False))
     except Exception:
         updated = incident
         history.append(ToolCallRecord(tool=tool_name, reason=reason, success=False))

@@ -20,12 +20,14 @@ def collect_incident_context(
     service: str = "payment-service",
     label_selector: str | None = None,
     deployment_name: str | None = None,
+    service_required: bool = False,
 ) -> IncidentContext:
     """Collect initial facts for a caller-selected workload, without writing to it."""
     incident = IncidentContext(
         incident_id=f"INC-{uuid.uuid4().hex[:8].upper()}",
         namespace=namespace, service=service,
         label_selector=label_selector, deployment_name=deployment_name,
+        service_required=service_required,
     )
     # Validate caller-supplied targeting before making any API request.
     _context(incident)

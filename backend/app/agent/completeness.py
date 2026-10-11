@@ -13,6 +13,19 @@ class InvestigationCompleteness(BaseModel):
     reason: str | None = None
 
 
+def service_routing_required(incident: IncidentContext) -> bool:
+    """Whether Service routing evidence applies to this target.
+
+    Unknown remains conservative; the CLI's target name alone is not proof
+    that a Kubernetes Service is expected.
+    """
+    if incident.service_applicability == "workload_only":
+        return False
+    if incident.service_required or incident.service_applicability in {"service_backed", "missing"}:
+        return True
+    return True
+
+
 def _current(item) -> bool:
     """Reject evidence explicitly marked historical or older than the temporal horizon."""
     if item.source != "kubernetes":
@@ -57,6 +70,22 @@ def assess_investigation_completeness(
                                              reason="Current Pod health and labels are required before diagnosis.")
         return InvestigationCompleteness(complete=False,
                                          reason="Current Pod health and labels remain unknown after get_pod_status.")
+    if not service_routing_required(incident):
+        deployment_name = incident.deployment_name or incident.service
+        deployment_seen = any(
+            _target_observation(item, incident) and item.category == "deployment_config"
+            and item.data.get("deployment_name") == deployment_name
+            for item in incident.evidence
+        )
+        if not deployment_seen:
+            if "get_deployment" not in attempted:
+                return InvestigationCompleteness(
+                    complete=False, next_tool="get_deployment",
+                    reason="Current Deployment configuration is required for a workload-only target.")
+            return InvestigationCompleteness(
+                complete=False,
+                reason="Current Deployment configuration remains unknown after get_deployment.")
+        return InvestigationCompleteness(complete=True)
     if not service_seen:
         if "get_service" not in attempted:
             return InvestigationCompleteness(

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kubernetes import client
+from kubernetes.client.exceptions import ApiException
 
 from app.models.evidence import Evidence
 from app.models.incident import IncidentContext
@@ -16,6 +17,10 @@ from app.tools.k8s_client import load_cluster
 
 class InvestigationToolError(Exception):
     """A safe error from the read-only investigation boundary."""
+
+    def __init__(self, message: str, *, not_found: bool = False):
+        super().__init__(message)
+        self.not_found = not_found
 
 
 def _safe_name(value: str, label: str) -> str:
@@ -273,6 +278,11 @@ def execute_investigation_tool(tool_name: str, incident: IncidentContext) -> lis
         return tool(incident)
     except InvestigationToolError:
         raise
+    except ApiException as exc:
+        raise InvestigationToolError(
+            f"Read-only investigation tool {tool_name} failed.",
+            not_found=exc.status == 404,
+        ) from exc
     except Exception as exc:
         raise InvestigationToolError(f"Read-only investigation tool {tool_name} failed.") from exc
 

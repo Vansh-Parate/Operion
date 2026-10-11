@@ -36,6 +36,10 @@ RiskLevel = Literal["low", "medium", "high"]
 ProposalStatus = Literal[
     "supported_and_allowed", "known_but_not_executable_yet", "denied", "abstain",
 ]
+AbstentionReasonCode = Literal[
+    "no_action_needed", "insufficient_evidence", "safety_concern",
+    "unsupported_operation", "uncertain",
+]
 
 
 class ResourceTarget(BaseModel):
@@ -118,8 +122,12 @@ class RemediationProposal(BaseModel):
     recommended_candidate_index: int | None = None
     abstain: bool = False
     abstain_reason: str | None = None
+    abstain_reason_code: AbstentionReasonCode | None = None
     abstain_stage: str | None = None
     abstain_origin: str | None = None
+    model_abstention_reason_code: AbstentionReasonCode | None = None
+    model_abstention_stage: str | None = None
+    model_abstention_origin: str | None = None
     generation_status: str | None = None
     generation_latency_ms: int | None = None
     fallback_used: bool = False

@@ -15,6 +15,8 @@ def main() -> None:
     parser.add_argument("--service", default="payment-service", help="Service to investigate")
     parser.add_argument("--label-selector", help="Pod label selector (defaults to app=<service>)")
     parser.add_argument("--deployment", help="Deployment name (defaults to the service name)")
+    parser.add_argument("--require-service", action="store_true",
+                        help="Declare that a Kubernetes Service is expected for this target")
     args = parser.parse_args()
     print(f"Target namespace: {args.namespace}")
     print(f"Target service: {args.service}")
@@ -30,6 +32,7 @@ def main() -> None:
         "tool_history": [], "investigation_iteration": 0, "sufficient_evidence": False,
         "target_namespace": args.namespace, "target_service": args.service,
         "target_label_selector": args.label_selector, "target_deployment": args.deployment,
+        "target_service_required": args.require_service,
     }
     state = initial
     announced_iteration = 0
@@ -54,10 +57,14 @@ def main() -> None:
             print("because the local remediation model timed out.")
         else:
             print("because the local remediation model returned an unusable intent.")
+        if proposal.model_abstention_reason_code:
+            print(f"Model abstention code: {proposal.model_abstention_reason_code}")
+            print(f"Model abstention stage: {proposal.model_abstention_stage or 'unknown'}")
     if proposal is not None:
         print(f"Remediation generation: status={proposal.generation_status or 'unknown'}, latency_ms={proposal.generation_latency_ms or 0}, fallback_used={proposal.fallback_used}")
     if proposal is not None and proposal.abstain:
         print(f"\nNo safe remediation proposed.\nReason: {proposal.abstain_reason or 'Insufficient support.'}")
+        print(f"Abstention reason code: {proposal.abstain_reason_code or 'uncertain'}")
         print(f"Abstention stage: {proposal.abstain_stage or 'unknown'}")
         print(f"Abstention origin: {proposal.abstain_origin or 'unknown'}")
     elif proposal is not None:

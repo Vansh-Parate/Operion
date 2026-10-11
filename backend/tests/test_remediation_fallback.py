@@ -152,10 +152,12 @@ def test_explicit_safety_abstention_is_not_overridden(monkeypatch, selector_inci
                                       evidence_ids=[])))
     proposal, metadata = remediation_generator.generate_remediation_proposal(
         selector_incident, [], diagnosis(), [], return_metadata=True)
-    assert proposal.abstain
-    assert proposal.abstain_origin == "explicit_safety_abstention"
-    assert proposal.abstain_stage == "llm_intent"
-    assert metadata["fallback_used"] is False
+    # The model's claim that the selector matches is contradicted by the live
+    # Service/Deployment evidence, so it is not accepted as a safety fact.
+    assert not proposal.abstain
+    assert proposal.candidates[0].operation.operation == "patch_service_selector"
+    assert proposal.candidates[0].operation.parameters == {"selector": {"app": "selector-demo"}}
+    assert metadata["fallback_used"] is True
 
 
 def test_unavailable_knowledge_reference_does_not_invalidate_live_grounding(monkeypatch, selector_incident):
@@ -178,3 +180,23 @@ def test_abstention_has_structured_origin_and_stage_on_contradiction(monkeypatch
     assert proposal.abstain
     assert proposal.abstain_stage == "evidence_grounding"
     assert proposal.abstain_origin == "safety_abstention"
+    assert proposal.abstain_reason_code == "safety_concern"
+
+
+def test_generic_uncertainty_falls_back_when_selector_evidence_is_valid(monkeypatch, selector_incident):
+    monkeypatch.setattr(remediation_generator.requests, "post", Mock(
+        return_value=intent_response(operation="none", reason="I am uncertain; no action is proposed.",
+                                      evidence_ids=[])))
+    proposal = remediation_generator.generate_remediation_proposal(
+        selector_incident, [], diagnosis(), [])
+    assert not proposal.abstain
+    assert proposal.candidates[0].operation.operation == "patch_service_selector"
+
+
+def test_no_action_needed_is_only_valid_for_no_active_incident(monkeypatch, selector_incident):
+    monkeypatch.setattr(remediation_generator.requests, "post", Mock(
+        return_value=intent_response(operation="none", reason="No action needed; uncertain.")))
+    proposal = remediation_generator.generate_remediation_proposal(
+        selector_incident, [], diagnosis(), [])
+    assert not proposal.abstain
+    assert proposal.candidates[0].operation.operation == "patch_service_selector"

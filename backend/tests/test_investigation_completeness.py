@@ -3,6 +3,7 @@ from unittest.mock import Mock
 from langgraph.graph import END
 
 from app.agent import nodes
+from app.agent.investigation_tools import InvestigationToolError
 from app.agent.completeness import assess_investigation_completeness
 from app.agent.graph import MAX_INVESTIGATION_ITERATIONS, build_incident_graph, route_after_hypotheses
 from app.agent.investigation_models import InvestigationDecision, ToolCallRecord
@@ -153,3 +154,30 @@ def test_observation_from_another_namespace_does_not_satisfy_service_requirement
     ])
     assessment = assess_investigation_completeness(case, [])
     assert assessment.next_tool == "get_service"
+
+
+def test_workload_only_target_uses_pod_and_deployment_without_service_reads():
+    case = incident().model_copy(update={"service_applicability": "workload_only"})
+    case.evidence.append(Evidence(source="kubernetes", category="deployment_config",
+                                  summary="Deployment", data={"deployment_name": "selector-demo"}))
+    result = assess_investigation_completeness(case, [])
+    assert result.complete
+    assert assess_current_workload_health(case).currently_healthy
+
+
+def test_service_read_timeout_does_not_reclassify_target(monkeypatch):
+    case = incident()
+    monkeypatch.setattr(nodes, "execute_investigation_tool",
+                        Mock(side_effect=InvestigationToolError("timeout")))
+    result = nodes.investigate_with_tool_node({"incident": case, "next_tool": "get_service"})
+    assert result["incident"].service_applicability == "unknown"
+
+
+def test_expected_missing_service_remains_incomplete():
+    case = incident().model_copy(update={"service_required": True})
+    updated = case.model_copy(update={"service_applicability": "missing"})
+    result = assess_investigation_completeness(updated, [
+        ToolCallRecord(tool="get_service", reason="Read Service", success=False)])
+    assert not result.complete
+    assert result.next_tool is None
+    assert "Service configuration remains unknown" in (result.reason or "")

@@ -26,9 +26,23 @@ REMEDIATION_TIMEOUT_SECONDS = 15
 KNOWN_FALLBACK_CONFIDENCE = 0.8
 
 
+def _reason_code(reason: str, *, stage: str, origin: str) -> str:
+    text = reason.lower()
+    if "no active incident" in text or "no action" in text:
+        return "no_action_needed"
+    if origin in {"safety_abstention", "explicit_safety_abstention", "policy_denied"}:
+        return "safety_concern"
+    if "unsupported" in text:
+        return "unsupported_operation"
+    if any(term in text for term in ("required", "insufficient", "unavailable", "unknown", "not observed")):
+        return "insufficient_evidence"
+    return "uncertain"
+
+
 def _abstain(reason: str, *, stage: str = "remediation_generation",
-             origin: str = "deterministic_safety") -> RemediationProposal:
+             origin: str = "deterministic_safety", reason_code: str | None = None) -> RemediationProposal:
     return RemediationProposal(abstain=True, abstain_reason=reason,
+                               abstain_reason_code=reason_code or _reason_code(reason, stage=stage, origin=origin),
                                abstain_stage=stage, abstain_origin=origin)
 
 
@@ -260,6 +274,9 @@ def _generate(incident: IncidentContext, hypotheses: list[Hypothesis], diagnosis
         return _abstain("The diagnosis does not establish a supported remediation pattern."), {"status": "abstain", "fallback_used": False, "latency_ms": 0}
     started = time.perf_counter()
     status, fallback_used = "llm_success", False
+    model_abstention_reason_code = None
+    model_abstention_stage = None
+    model_abstention_origin = None
     logger.info("model_stage_started", stage="remediation", model=OLLAMA_MODEL)
     legacy_payload = False
     try:
@@ -273,13 +290,19 @@ def _generate(incident: IncidentContext, hypotheses: list[Hypothesis], diagnosis
             if legacy.abstain or not legacy.candidates:
                 reason = legacy.abstain_reason or "No safe remediation intent was proposed."
                 if _explicit_safety_abstention(reason):
-                    return _abstain(reason, stage="llm_intent", origin="explicit_safety_abstention"), {"status": "llm_success", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+                    intent, fallback_reason = _known_pattern(incident, diagnosis)
+                    if intent is None:
+                        return _abstain(fallback_reason or reason, stage="evidence_grounding",
+                                        origin="safety_abstention", reason_code="safety_concern"), {"status": "llm_success", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+                    fallback_used = True
+                    legacy_payload = False
                 status = "llm_invalid"
-                intent, fallback_reason = _known_pattern(incident, diagnosis)
-                if intent is None:
-                    return _abstain(fallback_reason or reason, stage="deterministic_fallback", origin="fallback_ineligible"), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
-                fallback_used = True
-                legacy_payload = False
+                if not _explicit_safety_abstention(reason):
+                    intent, fallback_reason = _known_pattern(incident, diagnosis)
+                    if intent is None:
+                        return _abstain(fallback_reason or reason, stage="deterministic_fallback", origin="fallback_ineligible"), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+                    fallback_used = True
+                    legacy_payload = False
                 # Continue through deterministic enrichment below.
             else:
                 selected = legacy.candidates[legacy.recommended_candidate_index or 0].operation
@@ -294,6 +317,15 @@ def _generate(incident: IncidentContext, hypotheses: list[Hypothesis], diagnosis
                     status="abstain" if intent.operation == "none" else "success",
                     operation=intent.operation, evidence_count=len(intent.evidence_ids),
                     knowledge_count=len(intent.knowledge_ids))
+        if intent.operation == "none":
+            model_abstention_reason_code = _reason_code(
+                intent.reason, stage="llm_intent", origin="model_intent")
+            model_abstention_stage = "llm_intent"
+            model_abstention_origin = "model_intent"
+            logger.info("remediation_model_abstention",
+                        stage=model_abstention_stage,
+                        origin=model_abstention_origin,
+                        reason_code=model_abstention_reason_code)
         if intent.operation not in {"none", "unsupported"}:
             if any(int(ref[1:]) > len(incident.evidence) for ref in intent.evidence_ids):
                 return _abstain("The remediation intent cites unavailable live evidence."), {"status": "invalid_evidence", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
@@ -309,12 +341,18 @@ def _generate(incident: IncidentContext, hypotheses: list[Hypothesis], diagnosis
         elif intent.operation == "none":
             reason = intent.reason
             if _explicit_safety_abstention(reason):
-                return _abstain(reason, stage="llm_intent", origin="explicit_safety_abstention"), {"status": "llm_success", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
-            status = "llm_invalid"
-            intent, reason = _known_pattern(incident, diagnosis)
-            if intent is None:
-                return _abstain(reason or "The model returned an unusable empty remediation intent.", stage="deterministic_fallback", origin="fallback_ineligible"), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
-            fallback_used = True
+                fallback_intent, fallback_reason = _known_pattern(incident, diagnosis)
+                if fallback_intent is None:
+                    return _abstain(fallback_reason or reason, stage="evidence_grounding",
+                                    origin="safety_abstention", reason_code="safety_concern"), {"status": "llm_success", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+                intent = fallback_intent
+                fallback_used = True
+            else:
+                status = "llm_invalid"
+                intent, reason = _known_pattern(incident, diagnosis)
+                if intent is None:
+                    return _abstain(reason or "The model returned an unusable empty remediation intent.", stage="deterministic_fallback", origin="fallback_ineligible"), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+                fallback_used = True
         elif intent.operation == "unsupported":
             status = "llm_invalid"
             intent, reason = _known_pattern(incident, diagnosis)
@@ -376,9 +414,21 @@ def _generate(incident: IncidentContext, hypotheses: list[Hypothesis], diagnosis
                 "abstain_reason": fallback_reason or proposal.abstain_reason,
             })
     metadata = {"status": status, "fallback_used": fallback_used, "latency_ms": round((time.perf_counter() - started) * 1000)}
+    if model_abstention_reason_code is not None:
+        proposal = proposal.model_copy(update={
+            "model_abstention_reason_code": model_abstention_reason_code,
+            "model_abstention_stage": model_abstention_stage,
+            "model_abstention_origin": model_abstention_origin,
+        })
+        metadata.update({
+            "model_abstention_reason_code": model_abstention_reason_code,
+            "model_abstention_stage": model_abstention_stage,
+            "model_abstention_origin": model_abstention_origin,
+        })
     if proposal.abstain:
         logger.info("remediation_abstained", stage=proposal.abstain_stage or "unknown",
                     origin=proposal.abstain_origin or "unknown", status=status,
+                    reason_code=proposal.abstain_reason_code or "uncertain",
                     fallback_used=fallback_used)
     logger.info("model_stage_completed", stage="remediation", model=OLLAMA_MODEL,
                 latency_ms=metadata["latency_ms"], status=status, fallback_used=fallback_used)

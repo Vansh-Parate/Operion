@@ -41,3 +41,4 @@ class IncidentState(TypedDict):
     target_service: NotRequired[str]
     target_label_selector: NotRequired[str | None]
     target_deployment: NotRequired[str | None]
+    target_service_required: NotRequired[bool]
