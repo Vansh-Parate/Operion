@@ -13,7 +13,7 @@ Historical restarts, logs, and LLM claims cannot authorize a change by themselve
 
 ## Architecture and workflow
 
-~~~mermaid
+```mermaid
 flowchart LR
     CLI[app.agent.run] --> G[LangGraph state graph]
     G --> C[Collect Kubernetes evidence]
@@ -33,7 +33,7 @@ flowchart LR
     A -->|not approved| E
     X --> Y[Observed recovery verifier]
     Y --> E
-~~~
+```
 
 End-to-end flow:
 
@@ -75,30 +75,35 @@ A healthy payment-service with a real Service 404 is classified as workload-only
 
 ## Setup
 
-Use WSL from the repository root:
+Run Kubernetes setup commands from the repository root so manifest and build paths resolve correctly:
 
-~~~sh
+```sh
 cd /mnt/c/Dev/operion
-source .venv-wsl/bin/activate
-cd backend
-~~~
+```
 
-The application expects a local Kubernetes context and Ollama for live LLM calls. A Minikube sandbox can be prepared with:
+A Minikube sandbox can be prepared with:
 
-~~~sh
+```sh
 kubectl create namespace operon-sandbox --dry-run=client -o yaml | kubectl apply -f -
 minikube image build -t operion-payment-service:v1 sandbox/payment-service
 kubectl apply -f k8s/payment-service.yaml
 kubectl -n operion-sandbox rollout restart deployment/payment-service
 kubectl -n operion-sandbox rollout status deployment/payment-service
-~~~
+```
 
 Reset to healthy with:
 
-~~~sh
+```sh
 kubectl apply -f k8s/payment-service.yaml
 kubectl -n operon-sandbox rollout status deployment/payment-service
-~~~
+```
+
+The application expects a local Kubernetes context and Ollama for live LLM calls. Activate the existing environment and change to `backend` before running Python commands:
+
+```sh
+source .venv-wsl/bin/activate
+cd backend
+```
 
 Run one incident manifest at a time. The existing incident manifests also provide direct kubectl get, describe, and logs checks for each scenario.
 
@@ -106,9 +111,9 @@ Run one incident manifest at a time. The existing incident manifests also provid
 
 From backend:
 
-~~~sh
+```sh
 PYTHONPATH=. ../.venv-wsl/bin/python -m pytest -q
-~~~
+```
 
 The current backend suite passes 243 tests. Tests mock Kubernetes, Ollama, model loading, and Qdrant where appropriate; they do not require a model download or live Qdrant.
 
@@ -116,19 +121,19 @@ The current backend suite passes 243 tests. Tests mock Kubernetes, Ollama, model
 
 Model provisioning is explicit. Normal incident handling is local-cache-only and will not unexpectedly download from Hugging Face.
 
-~~~sh
+```sh
 PYTHONPATH=. ../.venv-wsl/bin/python -u -m app.rag.readiness
-~~~
+```
 
 If provisioning is needed, explicitly opt in:
 
-~~~sh
+```sh
 PYTHONPATH=. ../.venv-wsl/bin/python -u -m app.rag.readiness --allow-download
-~~~
+```
 
 Then rerun the cache-only check. The command validates model loading, a finite non-empty test embedding, and its dimension.
 
-In the current local environment, the Hugging Face snapshot appears complete at /home/radeon/.cache/huggingface/hub, including model.safetensors, but SentenceTransformer/PyTorch initialization exceeds the readiness timeout. Live runbook retrieval has therefore not been verified: it fails before Qdrant search at the embedding stage. Retrieval degrades safely to the curated Kubernetes documentation corpus. Do not describe runbook retrieval as working until readiness succeeds and a Qdrant-backed query returns results.
+In the current local environment, the Hugging Face snapshot appears complete in the configured Hugging Face cache (typically ~/.cache/huggingface/hub, or the location selected by HF_HOME/HF_HUB_CACHE), including model.safetensors, but SentenceTransformer/PyTorch initialization exceeds the readiness timeout. Live runbook retrieval has therefore not been verified: it fails before Qdrant search at the embedding stage. Retrieval degrades safely to the curated Kubernetes documentation corpus. Do not describe runbook retrieval as working until readiness succeeds and a Qdrant-backed query returns results.
 
 ## Safe 3–5 minute demo
 
@@ -136,35 +141,35 @@ These commands are read-only from Operion's perspective. Do not add --approve.
 
 ### 1. Healthy payment-service: no action
 
-~~~sh
+```sh
 PYTHONPATH=. timeout 180 ../.venv-wsl/bin/python -u -m app.agent.run \
   --namespace operon-sandbox \
   --service payment-service \
   --deployment payment-service \
   --label-selector app=payment-service
-~~~
+```
 
 Expected verified behavior: a real Service 404 classifies the target as workload-only; current healthy Pod and Deployment evidence leads to no_active_incident; no remediation is proposed or executed, and the graph cannot reach execution.
 
 ### 2. selector-demo: grounded recommendation only
 
-~~~sh
+```sh
 PYTHONPATH=. timeout 180 ../.venv-wsl/bin/python -u -m app.agent.run \
   --namespace operon-sandbox \
   --service selector-demo \
   --deployment selector-demo \
   --label-selector app=selector-demo
-~~~
+```
 
 Expected verified behavior: the investigation collects the Service selector, stable Pod labels, and zero ready endpoints. The recommendation is:
 
-~~~text
+```text
 operation: patch_service_selector
 target: Service/selector-demo
 selector: {"app": "selector-demo"}
 risk: medium
 executable_now: false
-~~~
+```
 
 It must cite observed evidence IDs, must not include pod-template-hash, and must not modify Kubernetes.
 
@@ -172,12 +177,13 @@ It must cite observed evidence IDs, must not include pod-template-hash, and must
 
 Do not break the healthy Deployment to demonstrate this path. Run the existing mocked policy, executor, and graph tests:
 
-~~~sh
+```sh
 PYTHONPATH=. ../.venv-wsl/bin/python -m pytest -q \
   tests/test_agent_graph.py \
   tests/test_agent_policy.py \
-  tests/test_generic_remediation_planning.py
-~~~
+  tests/test_generic_remediation_planning.py \
+  tests/test_agent_execution.py
+```
 
 These tests verify that direct current evidence for the missing PAYMENT_PROVIDER_URL is required, the value is allowlisted and normalized, approval is required, unsupported operations are rejected, and recovery is checked from observed Pod state. They do not perform a live Kubernetes mutation.
 
