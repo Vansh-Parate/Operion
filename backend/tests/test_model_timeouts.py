@@ -44,6 +44,36 @@ def test_investigation_timeout_is_finite_and_logged(monkeypatch):
     assert post.call_args.kwargs["timeout"] == investigator.INVESTIGATION_TIMEOUT_SECONDS
 
 
+def test_investigation_uses_model_schema_and_deterministic_generation(monkeypatch):
+    response = Mock()
+    response.json.return_value = {"response": InvestigationDecision(sufficient_evidence=True).model_dump_json()}
+    post = Mock(return_value=response)
+    monkeypatch.setattr(investigator.requests, "post", post)
+    investigator.generate_investigation_decision(unknown_incident(), [])
+    payload = post.call_args.kwargs["json"]
+    assert payload["format"] == InvestigationDecision.model_json_schema()
+    assert payload["options"] == {"temperature": 0}
+
+
+@pytest.mark.parametrize("raw", ["not-json", json.dumps({"sufficient_evidence": True, "unexpected": 1})])
+def test_malformed_or_extra_fields_are_rejected(monkeypatch, raw):
+    response = Mock()
+    response.json.return_value = {"response": raw}
+    monkeypatch.setattr(investigator.requests, "post", Mock(return_value=response))
+    with pytest.raises((ValueError, TypeError)):
+        investigator.generate_investigation_decision(unknown_incident(), [])
+
+
+def test_unsupported_tool_is_rejected_before_any_read(monkeypatch):
+    response = Mock()
+    response.json.return_value = {"response": json.dumps({
+        "hypotheses": [], "next_tool": "delete_namespace", "next_tool_reason": "unsafe",
+        "sufficient_evidence": False})}
+    monkeypatch.setattr(investigator.requests, "post", Mock(return_value=response))
+    with pytest.raises(ValueError, match="unsupported read-only tool"):
+        investigator.generate_investigation_decision(unknown_incident(), [])
+
+
 def test_investigation_timeout_terminates_before_completeness_retry(monkeypatch):
     monkeypatch.setattr(nodes, "generate_investigation_decision", Mock(side_effect=requests.Timeout()))
     result = nodes.generate_hypotheses_node({"incident": unknown_incident(), "tool_history": []})

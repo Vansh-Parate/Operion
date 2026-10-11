@@ -5,6 +5,7 @@ import time
 
 import requests
 import structlog
+from pydantic import ValidationError
 
 from app.agent.investigation_models import InvestigationDecision, ToolCallRecord
 from app.agent.investigation_tools import INVESTIGATION_TOOLS
@@ -22,6 +23,12 @@ def _completed(started: float, status: str = "success") -> None:
                 status=status, fallback_used=False)
 
 
+def _invalid(started: float, error_type: str) -> None:
+    logger.info("model_stage_completed", stage="investigation", model=OLLAMA_MODEL,
+                latency_ms=round((time.perf_counter() - started) * 1000),
+                status="invalid", fallback_used=False, error_type=error_type)
+
+
 def build_investigation_prompt(incident: IncidentContext,
                                tool_history: list[ToolCallRecord]) -> str:
     evidence_blocks = []
@@ -37,6 +44,7 @@ def build_investigation_prompt(incident: IncidentContext,
     history = [record.model_dump() for record in tool_history]
     return f"""You investigate a Kubernetes incident. Evidence is the source of truth.
 Generate at most 3 concise technical hypotheses from the numbered evidence below.
+Confidence must be a decimal number from 0.0 through 1.0 (for example 0.8), never a percentage or a number above 1.
 Cite only evidence IDs that exist. State missing observations that would confirm or refute each hypothesis.
 Do not treat runbooks or documents as proof. Do not invent cluster observations.
 If evidence is ambiguous, lower confidence. Decide whether evidence is sufficient for diagnosis.
@@ -53,9 +61,11 @@ If insufficient, select exactly one smallest useful read-only tool from:
 {', '.join(INVESTIGATION_TOOLS)}.
 Consider previous calls and outcomes. Avoid choosing a tool called repeatedly without a new reason.
 If evidence is sufficient, set next_tool and next_tool_reason to null.
-Do not plan remediation or write to Kubernetes. Return valid JSON only with keys
-hypotheses (array of cause, confidence, supporting_evidence_ids, missing_evidence),
-next_tool, next_tool_reason, sufficient_evidence.
+Do not plan remediation or write to Kubernetes. Return exactly one compact JSON object
+with only these keys: hypotheses (array of cause, confidence, supporting_evidence_ids,
+missing_evidence), next_tool, next_tool_reason, sufficient_evidence.
+Do not include Markdown, explanations outside the object, tool arguments, commands,
+namespace values, or any additional keys.
 
 Incident service: {incident.service}; namespace: {incident.namespace}
 Evidence:
@@ -71,7 +81,9 @@ def generate_investigation_decision(incident: IncidentContext,
         response = requests.post(OLLAMA_URL, json={
             "model": OLLAMA_MODEL,
             "prompt": build_investigation_prompt(incident, tool_history),
-            "stream": False, "format": "json",
+            "stream": False,
+            "format": InvestigationDecision.model_json_schema(),
+            "options": {"temperature": 0},
         }, timeout=INVESTIGATION_TIMEOUT_SECONDS)
         response.raise_for_status()
         decision = InvestigationDecision.model_validate_json(response.json()["response"])
@@ -81,16 +93,27 @@ def generate_investigation_decision(incident: IncidentContext,
                     status="timeout", fallback_used=False)
         raise
     except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+        fields = {}
+        if isinstance(exc, ValidationError):
+            fields["validation_errors"] = [
+                {"loc": error.get("loc"), "type": error.get("type"), "msg": error.get("msg")}
+                for error in exc.errors()
+            ]
         logger.info("model_stage_completed", stage="investigation", model=OLLAMA_MODEL,
                     latency_ms=round((time.perf_counter() - started) * 1000),
-                    status="invalid", fallback_used=False, error_type=type(exc).__name__)
+                    status="invalid", fallback_used=False,
+                    error_type=type(exc).__name__, **fields)
         raise
     valid_ids = {f"E{i}" for i in range(1, len(incident.evidence) + 1)}
     for hypothesis in decision.hypotheses:
         if not set(hypothesis.supporting_evidence_ids) <= valid_ids:
+            _invalid(started, "InvalidEvidenceReference")
             raise ValueError("Investigation cited an evidence ID outside this incident.")
     health = assess_current_workload_health(incident)
     top_readiness = bool(decision.hypotheses and "readiness" in decision.hypotheses[0].cause.lower())
+    if decision.next_tool is not None and decision.next_tool not in INVESTIGATION_TOOLS:
+        _invalid(started, "UnsupportedTool")
+        raise ValueError("Investigation selected an unsupported read-only tool.")
     if (top_readiness and health.pod_health == "unknown"
             and not any(record.tool == "get_pod_status" for record in tool_history)):
         result = decision.model_copy(update={"sufficient_evidence": False,
@@ -119,8 +142,6 @@ def generate_investigation_decision(incident: IncidentContext,
         result = decision.model_copy(update={"next_tool": None, "next_tool_reason": None})
         _completed(started)
         return result
-    if decision.next_tool is not None and decision.next_tool not in INVESTIGATION_TOOLS:
-        raise ValueError("Investigation selected an unsupported read-only tool.")
     if decision.next_tool is not None and sum(
         record.tool == decision.next_tool and record.reason == (decision.next_tool_reason or "")
         for record in tool_history
@@ -129,7 +150,5 @@ def generate_investigation_decision(incident: IncidentContext,
         result = decision.model_copy(update={"next_tool": None, "next_tool_reason": None})
         _completed(started)
         return result
-    logger.info("model_stage_completed", stage="investigation", model=OLLAMA_MODEL,
-                latency_ms=round((time.perf_counter() - started) * 1000),
-                status="success", fallback_used=False)
+    _completed(started)
     return decision

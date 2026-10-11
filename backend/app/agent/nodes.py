@@ -61,6 +61,7 @@ def collect_evidence_node(state: IncidentState) -> dict[str, Any]:
         "resolved": False,
         "hypotheses": [],
         "knowledge_documents": [],
+        "knowledge_retrieval_status": "not_started",
         "next_tool": None,
         "next_tool_reason": None,
         "tool_history": [],
@@ -140,7 +141,13 @@ def retrieve_knowledge_node(state: IncidentState) -> dict[str, Any]:
     incident = state.get("incident")
     if incident is None:
         raise ValueError("Knowledge retrieval requires collected incident evidence.")
-    return {"knowledge_documents": retrieve_operational_knowledge(incident, state.get("hypotheses", []))}
+    try:
+        documents = retrieve_operational_knowledge(incident, state.get("hypotheses", []))
+    except Exception as exc:
+        logger.info("knowledge_retrieval_failed", status="failed", error_type=type(exc).__name__)
+        return {"knowledge_documents": [], "knowledge_retrieval_status": "failed"}
+    return {"knowledge_documents": documents,
+            "knowledge_retrieval_status": "completed" if documents else "empty"}
 
 
 def diagnose_node(state: IncidentState) -> dict[str, Any]:

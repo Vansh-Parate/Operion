@@ -1,11 +1,13 @@
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Hypothesis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     cause: str = Field(min_length=1, max_length=240)
-    confidence: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0,
+                              description="Probability from 0.0 to 1.0, never a percentage or value above 1.")
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     missing_evidence: list[str] = Field(default_factory=list)
 
@@ -26,6 +28,7 @@ class Hypothesis(BaseModel):
 
 
 class InvestigationDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     hypotheses: list[Hypothesis] = Field(default_factory=list, max_length=3)
     next_tool: str | None = None
     next_tool_reason: str | None = None

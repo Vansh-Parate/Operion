@@ -28,6 +28,7 @@ class IncidentState(TypedDict):
     investigation_blocked_reason: NotRequired[str | None]
     investigation_model_failed: NotRequired[bool]
     knowledge_documents: NotRequired[list[KnowledgeDocument]]
+    knowledge_retrieval_status: NotRequired[str]
     remediation_proposal: NotRequired[RemediationProposal | None]
     proposal_decisions: NotRequired[list[ProposalDecision]]
     # Runtime collection target; retained across verification retries.

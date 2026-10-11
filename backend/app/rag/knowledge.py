@@ -1,11 +1,16 @@
 """Keep external guidance separate from live incident evidence."""
 
 import re
+import time
+
+import structlog
 
 from app.agent.investigation_models import Hypothesis
 from app.models.incident import IncidentContext
 from app.models.knowledge import KnowledgeDocument
 from app.rag.kubernetes_docs import retrieve_kubernetes_docs
+
+logger = structlog.get_logger(__name__)
 
 
 def build_knowledge_query(incident: IncidentContext, hypotheses: list[Hypothesis]) -> str:
@@ -35,14 +40,26 @@ def retrieve_runbooks(query: str, top_k: int = 3) -> list[KnowledgeDocument]:
 
 def retrieve_operational_knowledge(incident: IncidentContext,
                                    hypotheses: list[Hypothesis]) -> list[KnowledgeDocument]:
+    started = time.perf_counter()
+    logger.info("knowledge_retrieval_started")
     query = build_knowledge_query(incident, hypotheses)
+    logger.info("knowledge_query_completed", latency_ms=round((time.perf_counter() - started) * 1000),
+                query_length=len(query))
     try:
         runbooks = retrieve_runbooks(query, top_k=3)
-    except Exception:
+        logger.info("knowledge_runbooks_completed", latency_ms=round((time.perf_counter() - started) * 1000),
+                    result_count=len(runbooks))
+    except Exception as exc:
+        logger.info("knowledge_runbooks_failed", latency_ms=round((time.perf_counter() - started) * 1000),
+                    result_count=0, error_type=type(exc).__name__)
         runbooks = []
     try:
         docs = retrieve_kubernetes_docs(query, top_k=3)
-    except Exception:
+        logger.info("knowledge_kubernetes_docs_completed", latency_ms=round((time.perf_counter() - started) * 1000),
+                    result_count=len(docs))
+    except Exception as exc:
+        logger.info("knowledge_kubernetes_docs_failed", latency_ms=round((time.perf_counter() - started) * 1000),
+                    result_count=0, error_type=type(exc).__name__)
         docs = []
     # Interleave while giving the internal source first position.
     combined = []
@@ -71,4 +88,8 @@ def retrieve_operational_knowledge(incident: IncidentContext,
             seen_sources.add(source_key)
         if len(distinct) == 5:
             break
+    logger.info("knowledge_results_merged", latency_ms=round((time.perf_counter() - started) * 1000),
+                result_count=len(distinct))
+    logger.info("knowledge_retrieval_completed", latency_ms=round((time.perf_counter() - started) * 1000),
+                result_count=len(distinct))
     return distinct
