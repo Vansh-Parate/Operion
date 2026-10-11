@@ -144,6 +144,17 @@ def test_no_tool_is_noop(monkeypatch, incident):
     call.assert_not_called()
 
 
+def test_tool_node_enforces_investigation_bound(monkeypatch, incident):
+    call = Mock(side_effect=AssertionError("Bounded investigation must not execute another tool"))
+    monkeypatch.setattr(nodes, "execute_investigation_tool", call)
+    history = [ToolCallRecord(tool="get_events", reason="Read", success=True) for _ in range(5)]
+    result = nodes.investigate_with_tool_node({"incident": incident, "next_tool": "get_service",
+                                                "tool_history": history})
+    assert result["investigation_complete"] is False
+    assert "5 read-only tool calls" in result["investigation_blocked_reason"]
+    call.assert_not_called()
+
+
 def test_confidence_validation():
     with pytest.raises(ValidationError):
         Hypothesis(cause="Bad", confidence=1.2)

@@ -206,7 +206,8 @@ def get_service(incident: IncidentContext) -> list[Evidence]:
     obj = client.CoreV1Api().read_namespaced_service(name=service, namespace=namespace)
     data = {"name": obj.metadata.name, "selector": dict(obj.spec.selector or {}),
             "ports": [{"port": p.port, "target_port": str(p.target_port)} for p in obj.spec.ports or []],
-            "type": obj.spec.type}
+            "type": obj.spec.type, "observation_type": "current_state",
+            "observed_at": datetime.now(timezone.utc).isoformat()}
     return [_evidence(incident, "service_config", f"Service {service} configuration", data,
                       f"service/{service}")]
 
@@ -219,7 +220,8 @@ def get_endpoints(incident: IncidentContext) -> list[Evidence]:
         ready.extend(address.ip for address in subset.addresses or [])
         not_ready.extend(address.ip for address in subset.not_ready_addresses or [])
     return [_evidence(incident, "endpoints", f"Endpoints for service {service}",
-                      {"name": service, "ready_addresses": ready, "not_ready_addresses": not_ready},
+                      {"name": service, "ready_addresses": ready, "not_ready_addresses": not_ready,
+                       "observation_type": "current_state", "observed_at": datetime.now(timezone.utc).isoformat()},
                       f"endpoints/{service}")]
 
 

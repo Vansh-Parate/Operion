@@ -11,7 +11,7 @@ from app.agent.investigation_models import ToolCallRecord
 from app.agent.investigation_tools import execute_investigation_tool, merge_evidence
 from app.agent.investigator import generate_investigation_decision
 from app.agent.policy import validate_plan
-from app.agent.state import IncidentState
+from app.agent.state import IncidentState, MAX_INVESTIGATION_TOOL_CALLS
 from app.agent.tools import (
     KubernetesRemediationError, patch_deployment_environment_variable,
     verify_payment_service_recovery,
@@ -81,6 +81,10 @@ def generate_hypotheses_node(state: IncidentState) -> dict[str, Any]:
     incident = state.get("incident")
     if incident is None:
         raise ValueError("Investigation requires collected incident evidence.")
+    if state.get("investigation_model_failed"):
+        return {"hypotheses": state.get("hypotheses", []), "next_tool": None,
+                "next_tool_reason": None, "sufficient_evidence": False,
+                "investigation_model_failed": True}
     try:
         decision = generate_investigation_decision(incident, state.get("tool_history", []))
     except Exception as exc:
@@ -101,17 +105,20 @@ def check_investigation_completeness_node(state: IncidentState) -> dict[str, Any
     incident = state.get("incident")
     if incident is None:
         raise ValueError("Completeness check requires collected incident evidence.")
-    if state.get("investigation_model_failed"):
-        return {"investigation_complete": False,
-                "investigation_blocked_reason": "Investigation model failed; completeness could not be established.",
-                "sufficient_evidence": False, "next_tool": None, "next_tool_reason": None}
     assessment = assess_investigation_completeness(incident, state.get("tool_history", []))
     if assessment.complete:
         return {"investigation_complete": True, "investigation_blocked_reason": None}
     if assessment.next_tool is not None:
-        return {"investigation_complete": False, "investigation_blocked_reason": assessment.reason,
+        blocked_reason = assessment.reason
+        if state.get("investigation_model_failed"):
+            blocked_reason = f"{assessment.reason} Investigation model failed; diagnosis remains blocked."
+        return {"investigation_complete": False, "investigation_blocked_reason": blocked_reason,
                 "sufficient_evidence": False, "next_tool": assessment.next_tool,
-                "next_tool_reason": assessment.reason}
+                "next_tool_reason": blocked_reason}
+    if state.get("investigation_model_failed"):
+        return {"investigation_complete": False,
+                "investigation_blocked_reason": "Investigation model failed; completeness could not be established.",
+                "sufficient_evidence": False, "next_tool": None, "next_tool_reason": None}
     return {"investigation_complete": False, "investigation_blocked_reason": assessment.reason,
             "sufficient_evidence": False, "next_tool": None, "next_tool_reason": None}
 
@@ -120,11 +127,22 @@ def investigate_with_tool_node(state: IncidentState) -> dict[str, Any]:
     tool_name = state.get("next_tool")
     if tool_name is None:
         return {}
+    history = list(state.get("tool_history", []))
+    if len(history) >= MAX_INVESTIGATION_TOOL_CALLS:
+        return {
+            "tool_history": history,
+            "investigation_complete": False,
+            "investigation_blocked_reason": (
+                f"Investigation stopped safely after {MAX_INVESTIGATION_TOOL_CALLS} read-only tool calls; "
+                "required evidence remains incomplete."
+            ),
+            "next_tool": None,
+            "next_tool_reason": None,
+        }
     incident = state.get("incident")
     if incident is None:
         raise ValueError("Investigation requires collected incident evidence.")
     reason = state.get("next_tool_reason") or "Additional evidence requested."
-    history = list(state.get("tool_history", []))
     try:
         updated = merge_evidence(incident, execute_investigation_tool(tool_name, incident))
         history.append(ToolCallRecord(tool=tool_name, reason=reason, success=True,

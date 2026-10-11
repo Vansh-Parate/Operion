@@ -2,9 +2,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent import nodes
-from app.agent.state import IncidentState
+from app.agent.state import IncidentState, MAX_INVESTIGATION_TOOL_CALLS
 
-MAX_INVESTIGATION_ITERATIONS = 5
+# Preserve the public name used by the CLI and existing tests.
+MAX_INVESTIGATION_ITERATIONS = MAX_INVESTIGATION_TOOL_CALLS
 
 
 def route_after_hypotheses(state: IncidentState) -> str:

@@ -80,8 +80,20 @@ def test_investigation_timeout_terminates_before_completeness_retry(monkeypatch)
     assert result["investigation_model_failed"] is True
     checked = nodes.check_investigation_completeness_node({
         "incident": unknown_incident(), **result, "tool_history": []})
-    assert checked["next_tool"] is None
+    assert checked["next_tool"] == "get_pod_status"
     assert "model failed" in checked["investigation_blocked_reason"]
+
+
+def test_model_failure_still_collects_missing_service_observation(monkeypatch):
+    current = incident(Evidence(source="kubernetes", category="pod_status", summary="Observed",
+                                data={"pod_name": "web-1", "phase": "Running",
+                                      "pod_ready_condition": True, "labels": {"app": "web"},
+                                      "containers": [{"name": "web", "current_state": "running", "ready": True}]}))
+    monkeypatch.setattr(nodes, "generate_investigation_decision", Mock(side_effect=requests.Timeout()))
+    failed = nodes.generate_hypotheses_node({"incident": current, "tool_history": []})
+    checked = nodes.check_investigation_completeness_node({
+        "incident": current, **failed, "tool_history": []})
+    assert checked["next_tool"] == "get_service"
 
 
 def test_diagnosis_timeout_uses_supported_deterministic_fallback(monkeypatch):

@@ -111,3 +111,45 @@ def test_no_active_requires_both_dimensions():
     assert not assess_current_workload_health(case).currently_healthy
     checked = validate_diagnosis(case, Diagnosis(root_cause="no_active_incident", summary="Healthy"))
     assert checked.root_cause == "unknown"
+
+
+def test_stale_service_observation_does_not_satisfy_current_requirement():
+    case = incident()
+    case.evidence.extend([
+        Evidence(source="kubernetes", category="service_config", summary="Old Service",
+                 data={"name": "selector-demo", "selector": {"app": "selector-demo"},
+                       "age_seconds": 700, "temporal_status": "historical"}),
+        Evidence(source="kubernetes", category="endpoints", summary="Current endpoints",
+                 data={"name": "selector-demo", "ready_addresses": ["10.0.0.1"]}),
+    ])
+    assessment = assess_investigation_completeness(case, [])
+    assert assessment.complete is False
+    assert assessment.next_tool == "get_service"
+
+
+def test_stale_pod_observation_requests_current_pod_status():
+    case = incident()
+    case.evidence[0].data.update(age_seconds=700, temporal_status="historical")
+    case.evidence.extend([
+        Evidence(source="kubernetes", category="service_config", summary="Service",
+                 data={"name": "selector-demo", "selector": {"app": "selector-demo"}}),
+        Evidence(source="kubernetes", category="endpoints", summary="Endpoints",
+                 data={"name": "selector-demo", "ready_addresses": ["10.0.0.1"]}),
+    ])
+    assessment = assess_investigation_completeness(case, [])
+    assert assessment.complete is False
+    assert assessment.next_tool == "get_pod_status"
+
+
+def test_observation_from_another_namespace_does_not_satisfy_service_requirement():
+    case = incident()
+    case.evidence.extend([
+        Evidence(source="kubernetes", category="service_config", namespace="other",
+                 summary="Unrelated Service", data={"name": "selector-demo",
+                 "selector": {"app": "selector-demo"}}),
+        Evidence(source="kubernetes", category="endpoints", namespace="other",
+                 summary="Unrelated endpoints", data={"name": "selector-demo",
+                 "ready_addresses": ["10.0.0.1"]}),
+    ])
+    assessment = assess_investigation_completeness(case, [])
+    assert assessment.next_tool == "get_service"

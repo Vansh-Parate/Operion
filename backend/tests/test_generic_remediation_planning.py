@@ -157,6 +157,11 @@ def test_existing_env_repair_remains_only_executable_action():
 
 
 def test_unsupported_graph_terminates_without_approval_or_execution(monkeypatch, selector_incident):
+    selector_incident.evidence.append(Evidence(
+        source="kubernetes", category="pod_status", summary="Ready Pod",
+        data={"pod_name": "payments-api-1", "phase": "Running",
+              "pod_ready_condition": True, "labels": {"app": "payments"},
+              "containers": [{"name": "api", "current_state": "running", "ready": True}]}))
     proposal = RemediationProposal(candidates=[candidate(knowledge_ids=[])],
                                    recommended_candidate_index=0)
     monkeypatch.setattr(nodes, "collect_incident_context", Mock(return_value=selector_incident))
@@ -166,6 +171,7 @@ def test_unsupported_graph_terminates_without_approval_or_execution(monkeypatch,
     monkeypatch.setattr(nodes, "diagnose_with_llm", Mock(return_value=Diagnosis(
         root_cause="service_selector_mismatch", summary="Mismatch", supporting_evidence=["E1: Selector differs"])))
     monkeypatch.setattr(nodes, "generate_remediation_proposal", Mock(return_value=proposal))
+    monkeypatch.setattr(nodes, "execute_investigation_tool", Mock(return_value=[]))
     approve = Mock(side_effect=AssertionError("Approval must not run"))
     execute = Mock(side_effect=AssertionError("Execution must not run"))
     monkeypatch.setattr(nodes, "approval_node", approve)

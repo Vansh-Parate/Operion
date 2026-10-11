@@ -8,6 +8,11 @@ from app.models.incident import IncidentContext
 from app.models.knowledge import KnowledgeDocument
 
 
+# Shared by graph routing and the tool node so direct node calls cannot evade
+# the investigation bound.
+MAX_INVESTIGATION_TOOL_CALLS = 5
+
+
 class IncidentState(TypedDict):
     incident: IncidentContext | None
     diagnosis: Diagnosis | None
