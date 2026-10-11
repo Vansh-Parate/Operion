@@ -1,6 +1,8 @@
 """Runbook vector retrieval with observable, bounded external operations."""
 
 import time
+import os
+from pathlib import Path
 from threading import Lock, Thread
 
 import structlog
@@ -20,9 +22,40 @@ _initialization_error = None
 _initialization_timed_out = False
 
 
-def _load_model():
+def model_cache_location() -> Path:
+    """Return the Hugging Face cache root used by the current environment."""
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"])
+    if os.environ.get("HUGGINGFACE_HUB_CACHE"):
+        return Path(os.environ["HUGGINGFACE_HUB_CACHE"])
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def inspect_model_cache() -> dict:
+    model_root = model_cache_location() / "models--sentence-transformers--all-MiniLM-L6-v2"
+    snapshots = sorted((model_root / "snapshots").glob("*")) if (model_root / "snapshots").exists() else []
+    snapshot = snapshots[-1] if snapshots else None
+    required = (
+        "config.json", "modules.json", "model.safetensors", "tokenizer.json",
+        "tokenizer_config.json", "vocab.txt", "1_Pooling/config.json",
+    )
+    missing = [] if snapshot is None else [item for item in required if not (snapshot / item).is_file()]
+    if snapshot is None:
+        missing = list(required)
+    return {
+        "cache_root": str(model_cache_location()),
+        "model_root": str(model_root),
+        "snapshot": str(snapshot) if snapshot else None,
+        "missing": missing,
+        "complete": snapshot is not None and not missing,
+    }
+
+
+def _load_model(local_files_only: bool = True):
     from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(MODEL_NAME)
+    return SentenceTransformer(MODEL_NAME, local_files_only=local_files_only)
 
 
 def _create_client():
