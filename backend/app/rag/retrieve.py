@@ -20,42 +20,75 @@ _initialization_error = None
 _initialization_timed_out = False
 
 
+def _load_model():
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(MODEL_NAME)
+
+
+def _create_client():
+    from qdrant_client import QdrantClient
+    return QdrantClient(url=QDRANT_URL, timeout=QDRANT_TIMEOUT_SECONDS)
+
+
 def _initialize_resources(started: float) -> None:
     global _model, _client, _initialization_error
     try:
-        from qdrant_client import QdrantClient
-        from sentence_transformers import SentenceTransformer
-        with _resources_lock:
-            if _model is None:
-                _model = SentenceTransformer(MODEL_NAME)
-            if _client is None:
-                _client = QdrantClient(url=QDRANT_URL, timeout=QDRANT_TIMEOUT_SECONDS)
+        if _model is None:
+            model_started = time.perf_counter()
+            model = _load_model()
+            with _resources_lock:
+                if _model is None:
+                    _model = model
+            logger.info("knowledge_embedding_model_completed", stage="model",
+                        latency_ms=round((time.perf_counter() - model_started) * 1000),
+                        model=MODEL_NAME)
+
+        if _client is None:
+            client_started = time.perf_counter()
+            client = _create_client()
+            with _resources_lock:
+                if _client is None:
+                    _client = client
+            logger.info("knowledge_embedding_client_completed", stage="qdrant",
+                        latency_ms=round((time.perf_counter() - client_started) * 1000))
     except Exception as exc:
-        _initialization_error = exc
+        with _resources_lock:
+            _initialization_error = exc
         logger.info("knowledge_embedding_initialization_failed",
                     latency_ms=round((time.perf_counter() - started) * 1000),
-                    error_type=type(exc).__name__)
+                    error_type=type(exc).__name__,
+                    stage="model" if _model is None else "qdrant")
     else:
+        with _resources_lock:
+            _initialization_error = None
         logger.info("knowledge_embedding_initialization_completed",
                     latency_ms=round((time.perf_counter() - started) * 1000), model=MODEL_NAME)
 
 
 def _resources():
-    global _initialization_thread, _initialization_timed_out
+    global _initialization_thread, _initialization_error, _initialization_timed_out
     if _model is not None and _client is not None:
         return _model, _client
-    started = time.perf_counter()
-    if _initialization_thread is None:
-        logger.info("knowledge_embedding_initialization_started", model=MODEL_NAME)
-        _initialization_thread = Thread(target=_initialize_resources, args=(started,), daemon=True)
-        _initialization_thread.start()
+
+    with _resources_lock:
+        if _model is not None and _client is not None:
+            return _model, _client
+        if _initialization_thread is None or not _initialization_thread.is_alive():
+            started = time.perf_counter()
+            _initialization_error = None
+            _initialization_timed_out = False
+            logger.info("knowledge_embedding_initialization_started", model=MODEL_NAME)
+            _initialization_thread = Thread(target=_initialize_resources, args=(started,), daemon=True)
+            _initialization_thread.start()
+        initialization_thread = _initialization_thread
+
     if not _initialization_timed_out:
-        _initialization_thread.join(timeout=EMBEDDING_INITIALIZATION_TIMEOUT_SECONDS)
-    if _initialization_thread.is_alive():
+        initialization_thread.join(timeout=EMBEDDING_INITIALIZATION_TIMEOUT_SECONDS)
+    if initialization_thread.is_alive():
         _initialization_timed_out = True
         logger.info("knowledge_embedding_initialization_failed",
-                    latency_ms=round((time.perf_counter() - started) * 1000),
-                    error_type="TimeoutError")
+                    latency_ms=EMBEDDING_INITIALIZATION_TIMEOUT_SECONDS * 1000,
+                    error_type="TimeoutError", stage="model" if _model is None else "qdrant")
         raise TimeoutError("Embedding model initialization exceeded its bounded timeout.")
     if _initialization_error is not None:
         raise _initialization_error

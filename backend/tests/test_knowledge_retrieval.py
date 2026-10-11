@@ -1,4 +1,5 @@
 from types import SimpleNamespace as NS
+from threading import Event, Thread
 
 import pytest
 
@@ -72,6 +73,77 @@ def test_embedding_initialization_timeout_is_bounded(monkeypatch):
     monkeypatch.setattr(retrieve, "_initialization_timed_out", True)
     with pytest.raises(TimeoutError):
         retrieve._resources()
+
+
+def test_successful_initialization_is_reused(monkeypatch):
+    reset_resources(monkeypatch)
+    calls = {"model": 0, "client": 0}
+
+    monkeypatch.setattr(retrieve, "_load_model", lambda: calls.__setitem__("model", calls["model"] + 1) or object())
+    monkeypatch.setattr(retrieve, "_create_client", lambda: calls.__setitem__("client", calls["client"] + 1) or object())
+
+    first = retrieve._resources()
+    second = retrieve._resources()
+    assert first == second
+    assert calls == {"model": 1, "client": 1}
+
+
+def test_concurrent_initialization_is_single_flight(monkeypatch):
+    reset_resources(monkeypatch)
+    entered = Event()
+    release = Event()
+    calls = {"model": 0}
+
+    def load_model():
+        calls["model"] += 1
+        entered.set()
+        release.wait(timeout=2)
+        return object()
+
+    monkeypatch.setattr(retrieve, "_load_model", load_model)
+    monkeypatch.setattr(retrieve, "_create_client", lambda: object())
+    results = []
+    errors = []
+
+    def load():
+        try:
+            results.append(retrieve._resources())
+        except Exception as exc:  # pragma: no cover - assertion below reports unexpected failures
+            errors.append(exc)
+
+    first_thread = Thread(target=load)
+    first_thread.start()
+    assert entered.wait(timeout=2)
+    second_thread = Thread(target=load)
+    second_thread.start()
+    release.set()
+    threads = [first_thread, second_thread]
+    for thread in threads:
+        thread.join(timeout=3)
+    assert errors == []
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert calls["model"] == 1
+
+
+def test_initialization_failure_is_reported_and_can_retry(monkeypatch):
+    reset_resources(monkeypatch)
+    calls = {"model": 0}
+
+    def load_model():
+        calls["model"] += 1
+        if calls["model"] == 1:
+            raise RuntimeError("model unavailable")
+        return object()
+
+    monkeypatch.setattr(retrieve, "_load_model", load_model)
+    monkeypatch.setattr(retrieve, "_create_client", lambda: object())
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        retrieve._resources()
+    assert retrieve._model is None
+    assert retrieve._client is None
+    assert retrieve._resources()[0] is not None
+    assert calls["model"] == 2
 
 
 def test_knowledge_merge_returns_empty_results_without_inventing_documents(monkeypatch):
