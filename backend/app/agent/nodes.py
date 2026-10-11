@@ -186,7 +186,9 @@ def generate_remediation_proposal_node(state: IncidentState) -> dict[str, Any]:
             proposal, metadata = generated, {"status": "llm_success", "fallback_used": False}
     except Exception:
         proposal = RemediationProposal(abstain=True,
-                                       abstain_reason="Remediation generation failed safely.")
+                                       abstain_reason="Remediation generation failed safely.",
+                                       abstain_stage="remediation_generation",
+                                       abstain_origin="stage_failure")
         metadata = {"status": "failed", "fallback_used": False}
     proposal = proposal.model_copy(update={
         "generation_status": metadata.get("status", "unknown"),

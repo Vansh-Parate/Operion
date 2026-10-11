@@ -58,6 +58,8 @@ def main() -> None:
         print(f"Remediation generation: status={proposal.generation_status or 'unknown'}, latency_ms={proposal.generation_latency_ms or 0}, fallback_used={proposal.fallback_used}")
     if proposal is not None and proposal.abstain:
         print(f"\nNo safe remediation proposed.\nReason: {proposal.abstain_reason or 'Insufficient support.'}")
+        print(f"Abstention stage: {proposal.abstain_stage or 'unknown'}")
+        print(f"Abstention origin: {proposal.abstain_origin or 'unknown'}")
     elif proposal is not None:
         print("\nRemediation candidates:")
         for index, candidate in enumerate(proposal.candidates, start=1):
@@ -104,6 +106,8 @@ def main() -> None:
     unresolved = not state.get("resolved", False)
     if unresolved and execution is None and proposal is not None and not proposal.abstain:
         print("Incident status: unresolved; no executable remediation is available for this recommendation.")
+    elif unresolved and execution is None and proposal is not None and proposal.abstain:
+        print("Incident status: unresolved; no executable remediation is available because remediation abstained.")
     elif unresolved:
         print("Incident status: unresolved.")
 

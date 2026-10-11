@@ -26,8 +26,18 @@ REMEDIATION_TIMEOUT_SECONDS = 15
 KNOWN_FALLBACK_CONFIDENCE = 0.8
 
 
-def _abstain(reason: str) -> RemediationProposal:
-    return RemediationProposal(abstain=True, abstain_reason=reason)
+def _abstain(reason: str, *, stage: str = "remediation_generation",
+             origin: str = "deterministic_safety") -> RemediationProposal:
+    return RemediationProposal(abstain=True, abstain_reason=reason,
+                               abstain_stage=stage, abstain_origin=origin)
+
+
+def _explicit_safety_abstention(reason: str) -> bool:
+    text = reason.lower()
+    safety_markers = ("contradictory", "insufficient", "matches", "already shows",
+                      "required evidence", "confidence is too low", "outside")
+    fact_markers = ("evidence", "selector", "label", "endpoint", "target", "confidence")
+    return any(marker in text for marker in safety_markers) and any(marker in text for marker in fact_markers)
 
 
 def _redact_text(value: str) -> str:
@@ -208,13 +218,18 @@ def _enrich(intent: RemediationIntent, incident: IncidentContext, diagnosis: Dia
     if intent.operation in {"none", "unsupported"}:
         return _abstain(intent.reason)
     if any(int(ref[1:]) > len(incident.evidence) for ref in intent.evidence_ids):
-        return _abstain("The remediation intent cites unavailable live evidence.")
-    if any(int(ref[1:]) > len(knowledge_documents) for ref in intent.knowledge_ids):
-        return _abstain("The remediation intent cites unavailable operational knowledge.")
+        return _abstain("The remediation intent cites unavailable live evidence.",
+                        stage="intent_validation", origin="invalid_evidence")
+    # Knowledge references are optional; live evidence remains authoritative.
+    intent = intent.model_copy(update={
+        "knowledge_ids": [ref for ref in intent.knowledge_ids
+                           if int(ref[1:]) <= len(knowledge_documents)]
+    })
     if intent.operation == "patch_service_selector":
         grounded, reason = _ground_selector_mismatch(incident, diagnosis)
         if grounded is None:
-            return _abstain(reason or "Selector evidence could not be grounded safely.")
+            return _abstain(reason or "Selector evidence could not be grounded safely.",
+                            stage="evidence_grounding", origin="safety_abstention")
         # The model may choose an intent, but never supplies selector claims or prose.
         intent = grounded.model_copy(update={"knowledge_ids": intent.knowledge_ids})
     operation = RemediationOperation(operation=intent.operation,
@@ -231,7 +246,8 @@ def _enrich(intent: RemediationIntent, incident: IncidentContext, diagnosis: Dia
         risk_level="medium", confidence=1.0, verification_strategy=verification)
     checked, decisions = validate_remediation_proposal(RemediationProposal(candidates=[candidate], recommended_candidate_index=0), incident, knowledge_documents)
     if not decisions or decisions[0].status in {"denied", "abstain"}:
-        return _abstain(decisions[0].reason if decisions else "No candidate passed deterministic validation.")
+        return _abstain(decisions[0].reason if decisions else "No candidate passed deterministic validation.",
+                        stage="proposal_policy", origin="policy_denied")
     return checked
 
 
@@ -255,15 +271,29 @@ def _generate(incident: IncidentContext, hypotheses: list[Hypothesis], diagnosis
             legacy_payload = True
             legacy = RemediationProposal.model_validate(decoded)
             if legacy.abstain or not legacy.candidates:
-                return _abstain(legacy.abstain_reason or "No safe remediation intent was proposed."), {"status": "llm_success", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
-            selected = legacy.candidates[legacy.recommended_candidate_index or 0].operation
-            if selected.target is not None and selected.target.namespace != incident.namespace:
-                return _abstain("The remediation target namespace must come from IncidentContext."), {"status": "invalid_target", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
-            intent = RemediationIntent(operation=selected.operation, target_kind=selected.target.kind if selected.target else None,
-                target_name=selected.target.name if selected.target else None, reason=selected.reason,
-                evidence_ids=selected.evidence_ids, knowledge_ids=selected.knowledge_ids, parameters=selected.parameters)
+                reason = legacy.abstain_reason or "No safe remediation intent was proposed."
+                if _explicit_safety_abstention(reason):
+                    return _abstain(reason, stage="llm_intent", origin="explicit_safety_abstention"), {"status": "llm_success", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+                status = "llm_invalid"
+                intent, fallback_reason = _known_pattern(incident, diagnosis)
+                if intent is None:
+                    return _abstain(fallback_reason or reason, stage="deterministic_fallback", origin="fallback_ineligible"), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+                fallback_used = True
+                legacy_payload = False
+                # Continue through deterministic enrichment below.
+            else:
+                selected = legacy.candidates[legacy.recommended_candidate_index or 0].operation
+                if selected.target is not None and selected.target.namespace != incident.namespace:
+                    return _abstain("The remediation target namespace must come from IncidentContext.", stage="target_validation", origin="invalid_target"), {"status": "invalid_target", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+                intent = RemediationIntent(operation=selected.operation, target_kind=selected.target.kind if selected.target else None,
+                    target_name=selected.target.name if selected.target else None, reason=selected.reason,
+                    evidence_ids=selected.evidence_ids, knowledge_ids=selected.knowledge_ids, parameters=selected.parameters)
         else:
             intent = RemediationIntent.model_validate(decoded)
+        logger.info("remediation_intent_parsed", stage="llm_intent", model=OLLAMA_MODEL,
+                    status="abstain" if intent.operation == "none" else "success",
+                    operation=intent.operation, evidence_count=len(intent.evidence_ids),
+                    knowledge_count=len(intent.knowledge_ids))
         if intent.operation not in {"none", "unsupported"}:
             if any(int(ref[1:]) > len(incident.evidence) for ref in intent.evidence_ids):
                 return _abstain("The remediation intent cites unavailable live evidence."), {"status": "invalid_evidence", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
@@ -276,11 +306,20 @@ def _generate(incident: IncidentContext, hypotheses: list[Hypothesis], diagnosis
                 if intent is None:
                     return _abstain(reason or "Required remediation intent fields are missing."), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
                 fallback_used = True
+        elif intent.operation == "none":
+            reason = intent.reason
+            if _explicit_safety_abstention(reason):
+                return _abstain(reason, stage="llm_intent", origin="explicit_safety_abstention"), {"status": "llm_success", "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+            status = "llm_invalid"
+            intent, reason = _known_pattern(incident, diagnosis)
+            if intent is None:
+                return _abstain(reason or "The model returned an unusable empty remediation intent.", stage="deterministic_fallback", origin="fallback_ineligible"), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+            fallback_used = True
         elif intent.operation == "unsupported":
             status = "llm_invalid"
             intent, reason = _known_pattern(incident, diagnosis)
             if intent is None:
-                return _abstain(reason or "The model returned an unsupported operation."), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+                return _abstain(reason or "The model returned an unsupported operation.", stage="deterministic_fallback", origin="fallback_ineligible"), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
             fallback_used = True
     except requests.Timeout:
         status = "llm_timeout"
@@ -289,24 +328,29 @@ def _generate(incident: IncidentContext, hypotheses: list[Hypothesis], diagnosis
             logger.info("model_stage_completed", stage="remediation", model=OLLAMA_MODEL,
                         latency_ms=round((time.perf_counter() - started) * 1000),
                         status=status, fallback_used=False)
-            return _abstain(reason or "Remediation model timed out and deterministic fallback is unsafe."), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+            if reason and _explicit_safety_abstention(reason):
+                proposal = _abstain(reason, stage="evidence_grounding", origin="safety_abstention")
+            else:
+                proposal = _abstain(reason or "Remediation model timed out and deterministic fallback is unsafe.",
+                                     stage="deterministic_fallback", origin="fallback_ineligible")
+            return proposal, {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
         fallback_used = True
         logger.info("model_stage_completed", stage="remediation", model=OLLAMA_MODEL,
                     latency_ms=round((time.perf_counter() - started) * 1000),
                     status=status, fallback_used=True)
     except (requests.RequestException, KeyError, json.JSONDecodeError, ValidationError, ValueError) as exc:
         status = "llm_invalid"
-        if legacy_payload:
-            logger.info("model_stage_completed", stage="remediation", model=OLLAMA_MODEL,
-                        latency_ms=round((time.perf_counter() - started) * 1000),
-                        status=status, fallback_used=False)
-            return _abstain("The remediation response contained an invalid proposal."), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
         intent, reason = _known_pattern(incident, diagnosis)
         if intent is None:
             logger.info("model_stage_completed", stage="remediation", model=OLLAMA_MODEL,
                         latency_ms=round((time.perf_counter() - started) * 1000),
                         status=status, fallback_used=False)
-            return _abstain(reason or f"No safe structured remediation intent: {type(exc).__name__}."), {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
+            if reason and _explicit_safety_abstention(reason):
+                proposal = _abstain(reason, stage="evidence_grounding", origin="safety_abstention")
+            else:
+                proposal = _abstain(reason or f"No safe structured remediation intent: {type(exc).__name__}.",
+                                     stage="deterministic_fallback", origin="fallback_ineligible")
+            return proposal, {"status": status, "fallback_used": False, "latency_ms": round((time.perf_counter() - started) * 1000)}
         fallback_used = True
         logger.info("model_stage_completed", stage="remediation", model=OLLAMA_MODEL,
                     latency_ms=round((time.perf_counter() - started) * 1000),
@@ -314,9 +358,28 @@ def _generate(incident: IncidentContext, hypotheses: list[Hypothesis], diagnosis
     try:
         proposal = _enrich(intent, incident, diagnosis, knowledge_documents)
     except (ValidationError, KeyError, TypeError, ValueError) as exc:
-        proposal = _abstain(f"Remediation intent failed deterministic validation: {type(exc).__name__}.")
+        proposal = _abstain(f"Remediation intent failed deterministic validation: {type(exc).__name__}.",
+                            stage="intent_validation", origin="invalid_intent")
         status = "invalid_intent"
+    if (proposal.abstain and not fallback_used
+            and not _explicit_safety_abstention(proposal.abstain_reason or "")
+            and intent.operation not in {"none", "unsupported"}):
+        fallback_intent, fallback_reason = _known_pattern(incident, diagnosis)
+        if fallback_intent is not None:
+            status = "llm_invalid"
+            fallback_used = True
+            proposal = _enrich(fallback_intent, incident, diagnosis, knowledge_documents)
+        elif proposal.abstain_origin in {"policy_denied", "deterministic_safety"}:
+            proposal = proposal.model_copy(update={
+                "abstain_stage": "deterministic_fallback",
+                "abstain_origin": "fallback_ineligible",
+                "abstain_reason": fallback_reason or proposal.abstain_reason,
+            })
     metadata = {"status": status, "fallback_used": fallback_used, "latency_ms": round((time.perf_counter() - started) * 1000)}
+    if proposal.abstain:
+        logger.info("remediation_abstained", stage=proposal.abstain_stage or "unknown",
+                    origin=proposal.abstain_origin or "unknown", status=status,
+                    fallback_used=fallback_used)
     logger.info("model_stage_completed", stage="remediation", model=OLLAMA_MODEL,
                 latency_ms=metadata["latency_ms"], status=status, fallback_used=fallback_used)
     logger.info("remediation_generation_completed", **metadata)

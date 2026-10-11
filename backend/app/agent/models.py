@@ -118,6 +118,8 @@ class RemediationProposal(BaseModel):
     recommended_candidate_index: int | None = None
     abstain: bool = False
     abstain_reason: str | None = None
+    abstain_stage: str | None = None
+    abstain_origin: str | None = None
     generation_status: str | None = None
     generation_latency_ms: int | None = None
     fallback_used: bool = False

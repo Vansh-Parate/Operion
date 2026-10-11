@@ -70,7 +70,8 @@ def test_selector_explanation_is_grounded_and_cannot_reverse_selector_and_labels
     assert "Current Pod labels are app=wrong" not in operation.reason
 
 
-def test_selector_remediation_abstains_on_contradictory_label_evidence(selector_incident):
+def test_selector_remediation_abstains_on_contradictory_label_evidence(monkeypatch, selector_incident):
+    monkeypatch.setattr(remediation_generator.requests, "post", Mock(side_effect=requests.Timeout()))
     selector_incident.evidence.append(Evidence(
         source="kubernetes", category="pod_status", summary="Conflicting labels",
         data={"pod_name": "selector-demo-2", "labels": {"app": "another-value"}}))
@@ -125,3 +126,55 @@ def test_selector_proposal_is_recommendation_only(selector_incident):
     assert metadata["fallback_used"]
     assert proposal.candidates[0].operation.operation == "patch_service_selector"
     assert proposal.candidates[0].risk_level == "medium"
+
+
+def test_unusable_empty_intent_uses_grounded_selector_fallback(monkeypatch, selector_incident):
+    monkeypatch.setattr(remediation_generator.requests, "post", Mock(
+        return_value=intent_response(operation="none", reason="No safe remediation proposed.",
+                                      evidence_ids=[], target_kind=None, target_name=None,
+                                      parameters={})))
+    proposal, metadata = remediation_generator.generate_remediation_proposal(
+        selector_incident, [], diagnosis(), [], return_metadata=True)
+    operation = proposal.candidates[0].operation
+    assert not proposal.abstain
+    assert metadata["status"] == "llm_invalid"
+    assert metadata["fallback_used"] is True
+    assert operation.operation == "patch_service_selector"
+    assert operation.target.kind == "Service"
+    assert operation.target.name == "selector-demo"
+    assert operation.parameters == {"selector": {"app": "selector-demo"}}
+
+
+def test_explicit_safety_abstention_is_not_overridden(monkeypatch, selector_incident):
+    monkeypatch.setattr(remediation_generator.requests, "post", Mock(
+        return_value=intent_response(operation="none",
+                                      reason="Evidence shows the Service selector matches the observed Pod labels; no change is safe.",
+                                      evidence_ids=[])))
+    proposal, metadata = remediation_generator.generate_remediation_proposal(
+        selector_incident, [], diagnosis(), [], return_metadata=True)
+    assert proposal.abstain
+    assert proposal.abstain_origin == "explicit_safety_abstention"
+    assert proposal.abstain_stage == "llm_intent"
+    assert metadata["fallback_used"] is False
+
+
+def test_unavailable_knowledge_reference_does_not_invalidate_live_grounding(monkeypatch, selector_incident):
+    monkeypatch.setattr(remediation_generator.requests, "post", Mock(
+        return_value=intent_response(knowledge_ids=["K99"])))
+    proposal = remediation_generator.generate_remediation_proposal(
+        selector_incident, [], diagnosis(), [])
+    assert not proposal.abstain
+    assert proposal.candidates[0].operation.knowledge_ids == []
+    assert set(proposal.candidates[0].operation.evidence_ids) == {"E1", "E2", "E3"}
+
+
+def test_abstention_has_structured_origin_and_stage_on_contradiction(monkeypatch, selector_incident):
+    monkeypatch.setattr(remediation_generator.requests, "post", Mock(side_effect=requests.Timeout()))
+    selector_incident.evidence.append(Evidence(
+        source="kubernetes", category="pod_status", summary="Conflicting labels",
+        data={"pod_name": "selector-demo-2", "labels": {"app": "another-value"}}))
+    proposal = remediation_generator.generate_remediation_proposal(
+        selector_incident, [], diagnosis(), [])
+    assert proposal.abstain
+    assert proposal.abstain_stage == "evidence_grounding"
+    assert proposal.abstain_origin == "safety_abstention"
